@@ -30,8 +30,8 @@ def run_bot():
     bot_app = Application.builder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    bot_app.run_polling()
+    bot_app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
-    run_web()
+    run_web()    run_web()
