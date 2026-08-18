@@ -19,29 +19,21 @@ from telegram.ext import (
     ContextTypes,
 )
 
-
-# =========================================================
-# الإعدادات
-# =========================================================
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAGIC_HOUR_API_KEY = os.environ["MAGIC_HOUR_API_KEY"]
 
-# معرف المدير
+MAGIC_HOUR_BASE = "https://api.magichour.ai/v1"
+
 ADMIN_ID = 625548190
 
-MAGIC_HOUR_BASE = "https://api.magichour.ai/v1"
+# بيانات شام كاش
+SHAM_CASH_NUMBER = "55c04a684471d4b5f504f0e6e2ca7384"
 
 DB_FILE = "bot_data.db"
 
 app_web = Flask(__name__)
 
 user_states = {}
-
-
-# =========================================================
-# الباقات
-# =========================================================
 
 PACKAGES = {
     "pack_3": {
@@ -204,12 +196,11 @@ def remove_balance(user_id, amount):
 
 
 # =========================================================
-# Render Web Server
+# Render
 # =========================================================
 
 @app_web.route("/")
 def home():
-
     return "Telegram AI Video Bot is running!"
 
 
@@ -286,11 +277,9 @@ def create_video(
         "end_seconds": duration,
         "name": "Telegram AI Video",
         "resolution": resolution,
-    }
-
-    # إضافة الوصف بالطريقة المستخدمة في النسخة الحالية
-    payload["style"] = {
-        "prompt": prompt
+        "style": {
+            "prompt": prompt
+        }
     }
 
     response = requests.post(
@@ -519,7 +508,7 @@ def resolution_menu():
 
 
 # =========================================================
-# Start
+# الأوامر
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -575,7 +564,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# شراء الرصيد
+# شراء
 # =========================================================
 
 async def show_buy(update, context):
@@ -586,8 +575,8 @@ async def show_buy(update, context):
 
     await query.edit_message_text(
         "💰 اختر الباقة التي تريد شراءها:\n\n"
-        "بعد اختيار الباقة سيظهر لك "
-        "طريقة الدفع وإرسال إثبات التحويل.",
+        "بعد اختيار الباقة ستظهر لك بيانات "
+        "الدفع عبر شام كاش.",
         reply_markup=packages_menu()
     )
 
@@ -644,7 +633,8 @@ async def create_payment(update, context, package_id):
         f"🎬 الرصيد: {package['videos']} فيديو\n"
         f"💰 السعر: {package['price']:,} ل.س\n\n"
         "💳 طريقة الدفع:\n"
-        "قم بالتحويل إلى وسيلة الدفع التي تحددها أنت.\n\n"
+        "📱 شام كاش\n"
+        f"🔢 رقم الحساب:\n{SHAM_CASH_NUMBER}\n\n"
         "📸 بعد التحويل أرسل صورة إثبات الدفع "
         "هنا في البوت.\n\n"
         "⚠️ سيتم إضافة الرصيد بعد تأكيد الدفع.",
@@ -672,7 +662,10 @@ async def handle_payment_proof(update, context):
 
     user_id = update.effective_user.id
 
-    state = user_states.get(user_id, {})
+    state = user_states.get(
+        user_id,
+        {}
+    )
 
     if not state.get("waiting_payment_proof"):
 
@@ -742,13 +735,19 @@ async def handle_payment_proof(update, context):
             "بعد التأكيد."
         )
 
-        user_states.pop(user_id, None)
+        user_states.pop(
+            user_id,
+            None
+        )
 
         return True
 
     except Exception as error:
 
-        print("PAYMENT PROOF ERROR:", error)
+        print(
+            "PAYMENT PROOF ERROR:",
+            error
+        )
 
         await update.message.reply_text(
             "❌ حدث خطأ أثناء إرسال إثبات الدفع."
@@ -855,7 +854,10 @@ async def approve_payment(update, context, payment_id):
 
     except Exception as error:
 
-        print("USER NOTIFICATION ERROR:", error)
+        print(
+            "USER NOTIFICATION ERROR:",
+            error
+        )
 
 
 async def reject_payment(update, context, payment_id):
@@ -928,11 +930,14 @@ async def reject_payment(update, context, payment_id):
 
     except Exception as error:
 
-        print("REJECT NOTIFICATION ERROR:", error)
+        print(
+            "REJECT NOTIFICATION ERROR:",
+            error
+        )
 
 
 # =========================================================
-# الإدارة
+# لوحة الإدارة
 # =========================================================
 
 async def admin_panel(update, context):
@@ -1001,7 +1006,6 @@ async def admin_panel(update, context):
 async def admin_add(update, context):
 
     if update.effective_user.id != ADMIN_ID:
-
         return
 
     if len(context.args) != 2:
@@ -1056,7 +1060,6 @@ async def admin_add(update, context):
 async def admin_remove(update, context):
 
     if update.effective_user.id != ADMIN_ID:
-
         return
 
     if len(context.args) != 2:
@@ -1105,7 +1108,6 @@ async def admin_remove(update, context):
 async def admin_balance(update, context):
 
     if update.effective_user.id != ADMIN_ID:
-
         return
 
     if len(context.args) != 1:
@@ -1138,7 +1140,6 @@ async def admin_balance(update, context):
 async def admin_stats(update, context):
 
     if update.effective_user.id != ADMIN_ID:
-
         return
 
     connection = db()
@@ -1147,11 +1148,13 @@ async def admin_stats(update, context):
     cursor.execute(
         "SELECT COUNT(*) AS total FROM users"
     )
+
     users = cursor.fetchone()["total"]
 
     cursor.execute(
         "SELECT COALESCE(SUM(balance),0) AS total FROM users"
     )
+
     total_balance = cursor.fetchone()["total"]
 
     cursor.execute("""
@@ -1182,23 +1185,19 @@ async def admin_stats(update, context):
 
 
 # =========================================================
-# إنشاء الفيديو
+# الصور
 # =========================================================
 
 async def handle_photo(update, context):
 
     user_id = update.effective_user.id
 
-    ensure_user(
-        update.effective_user
-    )
+    ensure_user(update.effective_user)
 
-    # إذا كان المستخدم يرسل إثبات دفع
     if await handle_payment_proof(
         update,
         context
     ):
-
         return
 
     balance = get_balance(user_id)
@@ -1247,20 +1246,25 @@ async def handle_photo(update, context):
 
     except Exception as error:
 
-        print("PHOTO ERROR:", error)
+        print(
+            "PHOTO ERROR:",
+            error
+        )
 
         await update.message.reply_text(
             "❌ حدث خطأ أثناء استقبال الصورة."
         )
 
 
+# =========================================================
+# النص
+# =========================================================
+
 async def handle_text(update, context):
 
     user_id = update.effective_user.id
 
-    ensure_user(
-        update.effective_user
-    )
+    ensure_user(update.effective_user)
 
     state = user_states.get(
         user_id,
@@ -1349,7 +1353,7 @@ async def generate_video(update, context):
     if balance <= 0:
 
         await query.edit_message_text(
-            "💳 لا يوجد Credits/رصيد كافٍ.\n\n"
+            "💳 لا يوجد رصيد كافٍ.\n\n"
             "اشترِ رصيدًا أولاً.",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -1391,7 +1395,6 @@ async def generate_video(update, context):
             "480p"
         )
 
-        # رفع الصورة
         upload_url, file_path = create_upload_url(
             "jpg"
         )
@@ -1401,7 +1404,6 @@ async def generate_video(update, context):
             image_bytes
         )
 
-        # إنشاء الفيديو
         video_data = create_video(
             file_path=file_path,
             prompt=prompt,
@@ -1411,9 +1413,11 @@ async def generate_video(update, context):
 
         video_id = video_data["id"]
 
-        print("VIDEO ID:", video_id)
+        print(
+            "VIDEO ID:",
+            video_id
+        )
 
-        # الانتظار
         video_url, final_data = wait_for_video(
             video_id
         )
@@ -1427,7 +1431,6 @@ async def generate_video(update, context):
 
             return
 
-        # تحميل الفيديو
         video_response = requests.get(
             video_url,
             timeout=180
@@ -1435,7 +1438,6 @@ async def generate_video(update, context):
 
         video_response.raise_for_status()
 
-        # الخصم بعد النجاح فقط
         removed = remove_balance(
             user_id,
             1
@@ -1476,7 +1478,10 @@ async def generate_video(update, context):
 
     except requests.HTTPError as error:
 
-        print("HTTP ERROR:", error)
+        print(
+            "HTTP ERROR:",
+            error
+        )
 
         try:
 
@@ -1490,13 +1495,15 @@ async def generate_video(update, context):
 
         await query.edit_message_text(
             "❌ Magic Hour رفض الطلب.\n\n"
-            "جرّب استخدام:\n"
-            "480p + 5 ثواني + الإعدادات الافتراضية."
+            "جرّب استخدام 480p و5 ثواني."
         )
 
     except Exception as error:
 
-        print("GENERATION ERROR:", error)
+        print(
+            "GENERATION ERROR:",
+            error
+        )
 
         await query.edit_message_text(
             "❌ حدث خطأ أثناء إنشاء الفيديو.\n\n"
@@ -1514,23 +1521,15 @@ async def button_handler(update, context):
 
     user_id = query.from_user.id
 
-    ensure_user(
-        query.from_user
-    )
+    ensure_user(query.from_user)
 
     data = query.data
 
-    # شراء
     if data == "buy":
 
-        await show_buy(
-            update,
-            context
-        )
-
+        await show_buy(update, context)
         return
 
-    # اختيار باقة
     if data.startswith("package_"):
 
         package_id = data.replace(
@@ -1546,7 +1545,6 @@ async def button_handler(update, context):
 
         return
 
-    # تأكيد الدفع
     if data.startswith("approve_"):
 
         payment_id = int(
@@ -1564,7 +1562,6 @@ async def button_handler(update, context):
 
         return
 
-    # رفض الدفع
     if data.startswith("reject_"):
 
         payment_id = int(
@@ -1582,7 +1579,6 @@ async def button_handler(update, context):
 
         return
 
-    # الإدارة
     if data == "admin":
 
         await admin_panel(
@@ -1592,7 +1588,6 @@ async def button_handler(update, context):
 
         return
 
-    # إنشاء
     if data == "new_video":
 
         await query.answer()
@@ -1629,7 +1624,6 @@ async def button_handler(update, context):
 
         return
 
-    # الرصيد
     if data == "balance":
 
         await query.answer()
@@ -1644,7 +1638,6 @@ async def button_handler(update, context):
 
         return
 
-    # الإعدادات
     if data == "settings":
 
         await query.answer()
@@ -1664,7 +1657,6 @@ async def button_handler(update, context):
 
         return
 
-    # المدة
     if data == "durations":
 
         await query.answer()
@@ -1692,9 +1684,7 @@ async def button_handler(update, context):
 
         state["duration"] = duration
 
-        await query.answer(
-            f"تم اختيار {duration} ثانية."
-        )
+        await query.answer()
 
         await query.edit_message_text(
             f"✅ المدة: {duration} ثانية",
@@ -1703,7 +1693,6 @@ async def button_handler(update, context):
 
         return
 
-    # الدقة
     if data == "resolutions":
 
         await query.answer()
@@ -1729,9 +1718,7 @@ async def button_handler(update, context):
 
         state["resolution"] = resolution
 
-        await query.answer(
-            f"تم اختيار {resolution}"
-        )
+        await query.answer()
 
         await query.edit_message_text(
             f"✅ الدقة: {resolution}",
@@ -1740,7 +1727,6 @@ async def button_handler(update, context):
 
         return
 
-    # المساعدة
     if data == "help":
 
         await query.answer()
@@ -1756,7 +1742,6 @@ async def button_handler(update, context):
 
         return
 
-    # إلغاء
     if data == "cancel_generation":
 
         await query.answer()
@@ -1773,7 +1758,6 @@ async def button_handler(update, context):
 
         return
 
-    # رجوع
     if data == "back_main":
 
         await query.answer()
@@ -1785,7 +1769,6 @@ async def button_handler(update, context):
 
         return
 
-    # إنشاء الفيديو
     if data == "generate":
 
         await generate_video(
@@ -1830,7 +1813,6 @@ def run_bot():
         )
     )
 
-    # أوامر الإدارة
     bot_app.add_handler(
         CommandHandler(
             "add",
@@ -1859,7 +1841,6 @@ def run_bot():
         )
     )
 
-    # الصور
     bot_app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -1867,7 +1848,6 @@ def run_bot():
         )
     )
 
-    # النصوص
     bot_app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -1875,7 +1855,6 @@ def run_bot():
         )
     )
 
-    # الأزرار
     bot_app.add_handler(
         CallbackQueryHandler(
             button_handler
