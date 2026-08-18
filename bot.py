@@ -2,8 +2,9 @@ import os
 import time
 import threading
 import sqlite3
-import requests
-import traceback
+import asyncio
+import tempfile
+from pathlib import Path
 
 from flask import Flask
 
@@ -23,15 +24,22 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from gradio_client import Client, handle_file
+
 
 # =========================================================
 # الإعدادات
 # =========================================================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-MAGIC_HOUR_API_KEY = os.environ["MAGIC_HOUR_API_KEY"]
 
-MAGIC_HOUR_BASE = "https://api.magichour.ai/v1"
+# اختياري إذا كان Space يتطلب Token
+# لا تضع التوكن داخل الكود.
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+
+# Hugging Face Wan 2.2
+HF_SPACE = "zerogpu-aoti/wan2-2-fp8da-aoti-faster"
+HF_API_NAME = "/generate_video"
 
 # Telegram ID الخاص بك
 ADMIN_ID = 625548190
@@ -49,15 +57,41 @@ user_states = {}
 # قفل إنشاء الفيديو لكل مستخدم
 generation_locks = {}
 
-# قفل عام لعمليات الدفع الحساسة
+# قفل عمليات الدفع
 payment_lock = threading.Lock()
 
 
 # =========================================================
-# التجربة المجانية
+# إعدادات Wan 2.2
 # =========================================================
 
-FREE_TRIAL_DURATION = 3
+# المدد التي يدعمها هذا الـSpace تقريباً:
+# 8-80 frames @ 16fps
+# لذلك نستخدم 3 / 4 / 5 ثوانٍ.
+
+ALLOWED_DURATIONS = [
+    3,
+    4,
+    5,
+]
+
+DEFAULT_DURATION = 3
+
+# عدد خطوات الاستدلال
+DEFAULT_STEPS = 6
+
+DEFAULT_GUIDANCE = 1
+DEFAULT_GUIDANCE_2 = 1
+
+DEFAULT_NEGATIVE_PROMPT = (
+    "色调艳丽, 过曝, 静态, 细节模糊不清, 字幕, "
+    "风格, 作品, 画作, 画面, 静止, 整体发灰, "
+    "最差质量, 低质量, JPEG压缩残留, 丑陋的, "
+    "残缺的, 多余的手指, 画得不好的手部, "
+    "画得不好的脸部, 畸形的, 毁容的, "
+    "形态畸形的肢体, 手指融合, 静止不动的画面, "
+    "杂乱的背景, 三条腿, 背景人很多, 倒着走"
+)
 
 
 # =========================================================
@@ -65,7 +99,6 @@ FREE_TRIAL_DURATION = 3
 # =========================================================
 
 PACKAGES = {
-
     "pack_3": {
         "name": "🟢 باقة التجربة",
         "videos": 3,
@@ -97,7 +130,6 @@ PACKAGES = {
 # =========================================================
 
 def db():
-
     connection = sqlite3.connect(
         DB_FILE,
         timeout=30
@@ -111,12 +143,7 @@ def db():
 def init_db():
 
     connection = db()
-
     cursor = connection.cursor()
-
-    # -----------------------------------------------------
-    # المستخدمون
-    # -----------------------------------------------------
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -124,39 +151,10 @@ def init_db():
             username TEXT,
             first_name TEXT,
             balance INTEGER DEFAULT 0,
-            trial_used INTEGER DEFAULT 0,
+            free_trial_used INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    # -----------------------------------------------------
-    # إضافة عمود التجربة إذا كانت قاعدة البيانات قديمة
-    # -----------------------------------------------------
-
-    cursor.execute(
-        "PRAGMA table_info(users)"
-    )
-
-    columns = [
-        row["name"]
-        for row in cursor.fetchall()
-    ]
-
-    if "trial_used" not in columns:
-
-        print(
-            "Adding trial_used column to users table...",
-            flush=True
-        )
-
-        cursor.execute("""
-            ALTER TABLE users
-            ADD COLUMN trial_used INTEGER DEFAULT 0
-        """)
-
-    # -----------------------------------------------------
-    # المدفوعات
-    # -----------------------------------------------------
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS payments (
@@ -171,18 +169,22 @@ def init_db():
         )
     """)
 
+    # ترقية قاعدة بيانات قديمة إذا كانت لا تحتوي free_trial_used
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [row["name"] for row in cursor.fetchall()]
+
+    if "free_trial_used" not in columns:
+        cursor.execute("""
+            ALTER TABLE users
+            ADD COLUMN free_trial_used INTEGER DEFAULT 0
+        """)
+
     connection.commit()
-
     connection.close()
-
-    print(
-        "Database initialized successfully.",
-        flush=True
-    )
 
 
 # =========================================================
-# المستخدم
+# المستخدمون
 # =========================================================
 
 def ensure_user(user):
@@ -191,7 +193,6 @@ def ensure_user(user):
         return
 
     connection = db()
-
     cursor = connection.cursor()
 
     cursor.execute("""
@@ -201,7 +202,7 @@ def ensure_user(user):
             username,
             first_name,
             balance,
-            trial_used
+            free_trial_used
         )
         VALUES (?, ?, ?, 0, 0)
     """, (
@@ -223,25 +224,20 @@ def ensure_user(user):
     ))
 
     connection.commit()
-
     connection.close()
 
 
 def user_exists(user_id):
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT 1
         FROM users
         WHERE user_id = ?
         LIMIT 1
-        """,
-        (user_id,)
-    )
+    """, (user_id,))
 
     row = cursor.fetchone()
 
@@ -250,24 +246,16 @@ def user_exists(user_id):
     return row is not None
 
 
-# =========================================================
-# الرصيد
-# =========================================================
-
 def get_balance(user_id):
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT balance
         FROM users
         WHERE user_id = ?
-        """,
-        (user_id,)
-    )
+    """, (user_id,))
 
     row = cursor.fetchone()
 
@@ -282,7 +270,6 @@ def get_balance(user_id):
 def add_balance(user_id, amount):
 
     connection = db()
-
     cursor = connection.cursor()
 
     cursor.execute("""
@@ -297,7 +284,6 @@ def add_balance(user_id, amount):
     success = cursor.rowcount > 0
 
     connection.commit()
-
     connection.close()
 
     return success
@@ -306,7 +292,6 @@ def add_balance(user_id, amount):
 def remove_balance(user_id, amount):
 
     connection = db()
-
     cursor = connection.cursor()
 
     cursor.execute("""
@@ -323,30 +308,21 @@ def remove_balance(user_id, amount):
     success = cursor.rowcount > 0
 
     connection.commit()
-
     connection.close()
 
     return success
 
 
-# =========================================================
-# التجربة المجانية
-# =========================================================
-
 def has_free_trial(user_id):
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        SELECT trial_used
+    cursor.execute("""
+        SELECT free_trial_used
         FROM users
         WHERE user_id = ?
-        """,
-        (user_id,)
-    )
+    """, (user_id,))
 
     row = cursor.fetchone()
 
@@ -355,42 +331,32 @@ def has_free_trial(user_id):
     if not row:
         return False
 
-    return int(row["trial_used"] or 0) == 0
+    return int(row["free_trial_used"] or 0) == 1
 
 
 def mark_free_trial_used(user_id):
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         UPDATE users
-        SET trial_used = 1
+        SET free_trial_used = 1
         WHERE user_id = ?
-        AND trial_used = 0
-        """,
-        (user_id,)
-    )
+        AND free_trial_used = 0
+    """, (user_id,))
 
-    success = cursor.rowcount == 1
+    changed = cursor.rowcount > 0
 
     connection.commit()
-
     connection.close()
 
-    return success
+    return changed
 
-
-# =========================================================
-# أقفال إنشاء الفيديو
-# =========================================================
 
 def get_generation_lock(user_id):
 
     if user_id not in generation_locks:
-
         generation_locks[user_id] = threading.Lock()
 
     return generation_locks[user_id]
@@ -402,13 +368,11 @@ def get_generation_lock(user_id):
 
 @app_web.route("/")
 def home():
-
     return "Telegram AI Video Bot is running!"
 
 
 @app_web.route("/health")
 def health():
-
     return "OK"
 
 
@@ -429,321 +393,170 @@ def run_web():
 
 
 # =========================================================
-# Magic Hour
+# Hugging Face / Wan 2.2
 # =========================================================
 
-def magic_headers():
+def get_hf_client():
 
-    return {
+    print("Connecting to Hugging Face Space...")
 
-        "Authorization":
-            f"Bearer {MAGIC_HOUR_API_KEY}",
+    if HF_TOKEN:
 
-        "Content-Type":
-            "application/json",
-    }
-
-
-# =========================================================
-# Magic Hour - رابط رفع الصورة
-# =========================================================
-
-def create_upload_url(extension="jpg"):
-
-    print(
-        "MAGIC HOUR: Requesting upload URL...",
-        flush=True
-    )
-
-    response = requests.post(
-
-        f"{MAGIC_HOUR_BASE}/files/upload-urls",
-
-        headers=magic_headers(),
-
-        json={
-            "items": [
-                {
-                    "type": "image",
-                    "extension": extension
-                }
-            ]
-        },
-
-        timeout=60,
-    )
-
-    print(
-        "UPLOAD URL STATUS:",
-        response.status_code,
-        flush=True
-    )
-
-    print(
-        "UPLOAD URL RESPONSE:",
-        response.text,
-        flush=True
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    items = data.get(
-        "items",
-        []
-    )
-
-    if not items:
-
-        raise RuntimeError(
-            f"Magic Hour لم يعطِ رابط رفع الصورة: {data}"
+        client = Client(
+            HF_SPACE,
+            token=HF_TOKEN
         )
 
-    upload_url = items[0].get(
-        "upload_url"
-    )
+    else:
 
-    file_path = items[0].get(
-        "file_path"
-    )
-
-    if not upload_url or not file_path:
-
-        raise RuntimeError(
-            f"بيانات رفع الصورة غير مكتملة: {data}"
+        client = Client(
+            HF_SPACE
         )
 
-    return (
-        upload_url,
-        file_path
-    )
+    print("Hugging Face client connected.")
+
+    return client
 
 
-# =========================================================
-# رفع الصورة
-# =========================================================
+def normalize_video_result(result):
 
-def upload_image(
-    upload_url,
-    image_bytes
-):
+    """
+    Wan Space يرجع:
+    tuple:
+        [0] filepath
+        [1] seed
 
-    print(
-        "MAGIC HOUR: Uploading image...",
-        flush=True
-    )
+    هذه الدالة تتعامل أيضاً مع بعض صيغ Gradio الأخرى.
+    """
 
-    response = requests.put(
+    if result is None:
+        return None
 
-        upload_url,
+    video_output = result
 
-        data=image_bytes,
+    if isinstance(result, tuple):
+        if len(result) == 0:
+            return None
 
-        timeout=120,
-    )
+        video_output = result[0]
 
-    print(
-        "IMAGE UPLOAD STATUS:",
-        response.status_code,
-        flush=True
-    )
+    elif isinstance(result, list):
+        if len(result) == 0:
+            return None
 
-    print(
-        "IMAGE UPLOAD RESPONSE:",
-        response.text[:1000],
-        flush=True
-    )
+        video_output = result[0]
 
-    response.raise_for_status()
+    # filepath كنص
+    if isinstance(video_output, str):
+
+        if os.path.exists(video_output):
+            return video_output
+
+        return None
+
+    # Gradio FileData قد يرجع dict
+    if isinstance(video_output, dict):
+
+        path = video_output.get("path")
+
+        if path and os.path.exists(path):
+            return path
+
+        url = video_output.get("url")
+
+        if url:
+            return url
+
+    return None
 
 
-# =========================================================
-# إنشاء الفيديو
-# =========================================================
-
-def create_video(
-    file_path,
+def generate_wan_video(
+    image_path,
     prompt,
-    duration=5,
-    resolution="480p"
+    duration
 ):
 
-    payload = {
+    if duration not in ALLOWED_DURATIONS:
+        duration = DEFAULT_DURATION
 
-        "assets": {
-            "image_file_path":
-                file_path
-        },
+    print("=" * 60)
+    print("WAN 2.2 GENERATION STARTED")
+    print("Image:", image_path)
+    print("Duration:", duration)
+    print("Prompt:", prompt)
+    print("=" * 60)
 
-        "end_seconds":
-            duration,
+    client = get_hf_client()
 
-        "name":
-            "Telegram AI Video",
+    result = client.predict(
 
-        "resolution":
-            resolution,
+        input_image=handle_file(
+            image_path
+        ),
 
-        "style": {
-            "prompt":
-                prompt
-        }
-    }
+        prompt=prompt,
 
-    print(
-        "MAGIC HOUR: Creating video...",
-        flush=True
+        steps=DEFAULT_STEPS,
+
+        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+
+        duration_seconds=float(
+            duration
+        ),
+
+        guidance_scale=DEFAULT_GUIDANCE,
+
+        guidance_scale_2=DEFAULT_GUIDANCE_2,
+
+        seed=42,
+
+        randomize_seed=True,
+
+        api_name=HF_API_NAME
     )
 
     print(
-        "VIDEO PAYLOAD:",
-        payload,
-        flush=True
+        "WAN RESULT:",
+        result
     )
 
-    response = requests.post(
-
-        f"{MAGIC_HOUR_BASE}/image-to-video",
-
-        headers=magic_headers(),
-
-        json=payload,
-
-        timeout=120,
+    video_path = normalize_video_result(
+        result
     )
 
-    print(
-        "VIDEO CREATE STATUS:",
-        response.status_code,
-        flush=True
-    )
-
-    print(
-        "VIDEO CREATE RESPONSE:",
-        response.text,
-        flush=True
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    video_id = data.get(
-        "id"
-    )
-
-    if not video_id:
+    if not video_path:
 
         raise RuntimeError(
-            f"Magic Hour لم يرجع video ID: {data}"
+            "Wan 2.2 لم يرجع ملف فيديو صالح."
         )
 
-    return data
+    if not os.path.exists(video_path):
 
-
-# =========================================================
-# انتظار الفيديو
-# =========================================================
-
-def wait_for_video(video_id):
-
-    # 90 × 10 ثواني
-    # تقريباً 15 دقيقة
-
-    for attempt in range(90):
-
-        print(
-            f"CHECK VIDEO [{attempt + 1}/90]",
-            flush=True
+        raise RuntimeError(
+            f"ملف الفيديو غير موجود: {video_path}"
         )
 
-        response = requests.get(
-
-            f"{MAGIC_HOUR_BASE}/video-projects/{video_id}",
-
-            headers={
-                "Authorization":
-                    f"Bearer {MAGIC_HOUR_API_KEY}"
-            },
-
-            timeout=60,
-        )
-
-        print(
-            "STATUS CHECK HTTP:",
-            response.status_code,
-            flush=True
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        print(
-            "VIDEO STATUS DATA:",
-            data,
-            flush=True
-        )
-
-        status = data.get(
-            "status"
-        )
-
-        print(
-            f"VIDEO STATUS [{attempt + 1}/90]:",
-            status,
-            flush=True
-        )
-
-        if status == "complete":
-
-            downloads = data.get(
-                "downloads",
-                []
-            )
-
-            if downloads:
-
-                video_url = downloads[0].get(
-                    "url"
-                )
-
-                if video_url:
-
-                    return (
-                        video_url,
-                        data
-                    )
-
-            return (
-                None,
-                data
-            )
-
-        if status in [
-            "error",
-            "failed",
-            "canceled"
-        ]:
-
-            print(
-                "VIDEO FAILED:",
-                data,
-                flush=True
-            )
-
-            return (
-                None,
-                data
-            )
-
-        time.sleep(10)
-
-    return (
-        None,
-        None
+    file_size = os.path.getsize(
+        video_path
     )
+
+    print(
+        "VIDEO GENERATED:",
+        video_path
+    )
+
+    print(
+        "VIDEO SIZE:",
+        file_size
+    )
+
+    if file_size <= 0:
+
+        raise RuntimeError(
+            "الفيديو الناتج فارغ."
+        )
+
+    return video_path
 
 
 # =========================================================
@@ -752,13 +565,7 @@ def wait_for_video(video_id):
 
 def main_menu(user_id):
 
-    balance = get_balance(
-        user_id
-    )
-
-    trial_available = has_free_trial(
-        user_id
-    )
+    balance = get_balance(user_id)
 
     keyboard = [
 
@@ -796,28 +603,14 @@ def main_menu(user_id):
         ],
     ]
 
-    if trial_available:
-
-        keyboard.insert(
-            1,
-            [
-                InlineKeyboardButton(
-                    "🎁 تجربة مجانية — 3 ثواني",
-                    callback_data="new_video"
-                )
-            ]
-        )
-
     if user_id == ADMIN_ID:
 
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "👑 لوحة الإدارة",
-                    callback_data="admin"
-                )
-            ]
-        )
+        keyboard.append([
+            InlineKeyboardButton(
+                "👑 لوحة الإدارة",
+                callback_data="admin"
+            )
+        ])
 
     return InlineKeyboardMarkup(
         keyboard
@@ -825,7 +618,7 @@ def main_menu(user_id):
 
 
 # =========================================================
-# قائمة الباقات
+# الباقات
 # =========================================================
 
 def packages_menu():
@@ -834,30 +627,24 @@ def packages_menu():
 
     for package_id, package in PACKAGES.items():
 
-        keyboard.append(
-
-            [
-                InlineKeyboardButton(
-
-                    f"{package['name']} — "
-                    f"{package['videos']} فيديو — "
-                    f"{package['price']:,} ل.س",
-
-                    callback_data=
-                    f"package_{package_id}"
-                )
-            ]
-        )
-
-    keyboard.append(
-
-        [
+        keyboard.append([
             InlineKeyboardButton(
-                "⬅️ رجوع",
-                callback_data="back_main"
+
+                f"{package['name']} — "
+                f"{package['videos']} فيديو — "
+                f"{package['price']:,} ل.س",
+
+                callback_data=
+                f"package_{package_id}"
             )
-        ]
-    )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "⬅️ رجوع",
+            callback_data="back_main"
+        )
+    ])
 
     return InlineKeyboardMarkup(
         keyboard
@@ -872,12 +659,7 @@ def settings_menu(state):
 
     duration = state.get(
         "duration",
-        5
-    )
-
-    resolution = state.get(
-        "resolution",
-        "480p"
+        DEFAULT_DURATION
     )
 
     keyboard = [
@@ -891,8 +673,8 @@ def settings_menu(state):
 
         [
             InlineKeyboardButton(
-                f"📺 الدقة: {resolution}",
-                callback_data="resolutions"
+                "🤖 Wan 2.2 14B ⚡",
+                callback_data="wan_info"
             )
         ],
 
@@ -915,60 +697,22 @@ def duration_menu():
 
         [
             InlineKeyboardButton(
-                "5 ثواني ⭐",
+                "3 ثواني ⭐",
+                callback_data="duration_3"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "4 ثواني",
+                callback_data="duration_4"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "5 ثواني 🔥",
                 callback_data="duration_5"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "10 ثواني",
-                callback_data="duration_10"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "15 ثانية",
-                callback_data="duration_15"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "⬅️ رجوع",
-                callback_data="settings"
-            )
-        ]
-    ]
-
-    return InlineKeyboardMarkup(
-        keyboard
-    )
-
-
-def resolution_menu():
-
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "480p ⭐",
-                callback_data="resolution_480"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "720p",
-                callback_data="resolution_720"
-            )
-        ],
-
-        [
-            InlineKeyboardButton(
-                "1080p",
-                callback_data="resolution_1080"
             )
         ],
 
@@ -1007,20 +751,22 @@ async def start(
         user.id
     )
 
-    trial_available = has_free_trial(
+    trial_used = has_free_trial(
         user.id
     )
 
-    if trial_available:
+    if not trial_used:
 
         trial_text = (
-            "🎁 لديك تجربة مجانية واحدة!\n"
-            "⏱️ مدة التجربة: 3 ثوانٍ\n\n"
+            "🎁 لديك تجربة مجانية متاحة!\n"
+            "فيديو واحد لمدة 3 ثوانٍ."
         )
 
     else:
 
-        trial_text = ""
+        trial_text = (
+            "🎁 تم استخدام تجربتك المجانية."
+        )
 
     await update.message.reply_text(
 
@@ -1029,10 +775,12 @@ async def start(
         "🎬 أهلاً بك في بوت تحويل الصور "
         "إلى فيديو بالذكاء الاصطناعي.\n\n"
 
-        f"💰 رصيدك الحالي: "
-        f"{balance} فيديو\n\n"
+        "🤖 المحرك: Wan 2.2 14B\n"
+        "⚡ Lightning LoRA\n\n"
 
-        f"{trial_text}"
+        f"💰 رصيدك: {balance} فيديو\n\n"
+
+        f"{trial_text}\n\n"
 
         "📷 اضغط «إنشاء فيديو» للبدء.",
 
@@ -1083,15 +831,18 @@ async def help_command(
 
         "ℹ️ طريقة الاستخدام:\n\n"
 
-        "1️⃣ لديك تجربة مجانية واحدة لمدة 3 ثوانٍ.\n"
-        "2️⃣ بعد انتهاء التجربة اشترِ رصيدًا.\n"
-        "3️⃣ اضغط «إنشاء فيديو».\n"
-        "4️⃣ أرسل صورة.\n"
-        "5️⃣ اكتب وصف الحركة.\n"
-        "6️⃣ اضغط إنشاء الفيديو.\n\n"
+        "1️⃣ لديك تجربة مجانية لأول فيديو.\n"
+        "2️⃣ اضغط «إنشاء فيديو».\n"
+        "3️⃣ أرسل صورة.\n"
+        "4️⃣ اكتب وصف الحركة.\n"
+        "5️⃣ اضغط «إنشاء الفيديو».\n\n"
 
-        "مثال:\n"
+        "🎁 التجربة المجانية: 3 ثوانٍ.\n"
+        "💳 بعد ذلك تحتاج إلى رصيد.\n\n"
 
+        "⚙️ يمكنك اختيار 3 أو 4 أو 5 ثوانٍ.\n\n"
+
+        "مثال للوصف:\n"
         "اجعل الشخص يبتسم ويحرك رأسه "
         "بشكل طبيعي مع حركة كاميرا "
         "سينمائية خفيفة، مع الحفاظ "
@@ -1127,10 +878,6 @@ async def show_buy(
     )
 
 
-# =========================================================
-# إنشاء طلب دفع
-# =========================================================
-
 async def create_payment(
     update,
     context,
@@ -1159,11 +906,9 @@ async def create_payment(
     )
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         INSERT INTO payments
         (
             user_id,
@@ -1174,20 +919,17 @@ async def create_payment(
             status
         )
         VALUES (?, ?, ?, ?, ?, 'pending')
-        """,
-        (
-            user_id,
-            package_id,
-            package["name"],
-            package["videos"],
-            package["price"],
-        )
-    )
+    """, (
+        user_id,
+        package_id,
+        package["name"],
+        package["videos"],
+        package["price"],
+    ))
 
     payment_id = cursor.lastrowid
 
     connection.commit()
-
     connection.close()
 
     await query.answer()
@@ -1196,7 +938,6 @@ async def create_payment(
 
         [
             InlineKeyboardButton(
-
                 "📋 نسخ حساب شام كاش",
 
                 copy_text=CopyTextButton(
@@ -1232,8 +973,6 @@ async def create_payment(
 
         f"`{SHAM_CASH_NUMBER}`\n\n"
 
-        "اضغط الزر بالأسفل لنسخ الحساب مباشرة.\n\n"
-
         "📸 بعد التحويل أرسل صورة إثبات الدفع "
         "هنا في البوت.\n\n"
 
@@ -1253,7 +992,6 @@ async def create_payment(
 
         "payment_id":
             payment_id,
-
     }
 
 
@@ -1276,7 +1014,6 @@ async def handle_payment_proof(
     if not state.get(
         "waiting_payment_proof"
     ):
-
         return False
 
     payment_id = state.get(
@@ -1284,25 +1021,20 @@ async def handle_payment_proof(
     )
 
     if not payment_id:
-
         return False
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT *
         FROM payments
         WHERE id = ?
         AND user_id = ?
-        """,
-        (
-            payment_id,
-            user_id
-        )
-    )
+    """, (
+        payment_id,
+        user_id
+    ))
 
     payment = cursor.fetchone()
 
@@ -1348,20 +1080,15 @@ async def handle_payment_proof(
 
                 "💰 طلب دفع جديد\n\n"
 
-                f"🧾 رقم الطلب: "
-                f"#{payment_id}\n"
+                f"🧾 رقم الطلب: #{payment_id}\n"
 
-                f"👤 المستخدم: "
-                f"{user_id}\n"
+                f"👤 المستخدم: {user_id}\n"
 
-                f"📦 الباقة: "
-                f"{payment['package_name']}\n"
+                f"📦 الباقة: {payment['package_name']}\n"
 
-                f"🎬 الفيديوهات: "
-                f"{payment['videos']}\n"
+                f"🎬 الفيديوهات: {payment['videos']}\n"
 
-                f"💰 السعر: "
-                f"{payment['price']:,} ل.س\n\n"
+                f"💰 السعر: {payment['price']:,} ل.س\n\n"
 
                 "اختر الإجراء:"
             ),
@@ -1406,8 +1133,7 @@ async def handle_payment_proof(
 
         print(
             "PAYMENT PROOF ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
 
         await update.message.reply_text(
@@ -1441,17 +1167,13 @@ async def approve_payment(
     with payment_lock:
 
         connection = db()
-
         cursor = connection.cursor()
 
-        cursor.execute(
-            """
+        cursor.execute("""
             SELECT *
             FROM payments
             WHERE id = ?
-            """,
-            (payment_id,)
-        )
+        """, (payment_id,))
 
         payment = cursor.fetchone()
 
@@ -1477,15 +1199,12 @@ async def approve_payment(
 
             return
 
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE payments
             SET status = 'approved'
             WHERE id = ?
             AND status = 'pending'
-            """,
-            (payment_id,)
-        )
+        """, (payment_id,))
 
         if cursor.rowcount != 1:
 
@@ -1498,20 +1217,16 @@ async def approve_payment(
 
             return
 
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE users
             SET balance = balance + ?
             WHERE user_id = ?
-            """,
-            (
-                payment["videos"],
-                payment["user_id"]
-            )
-        )
+        """, (
+            payment["videos"],
+            payment["user_id"]
+        ))
 
         connection.commit()
-
         connection.close()
 
     new_balance = get_balance(
@@ -1527,11 +1242,9 @@ async def approve_payment(
 
         f"✅ تم تأكيد الطلب #{payment_id}\n\n"
 
-        f"👤 المستخدم: "
-        f"{payment['user_id']}\n\n"
+        f"👤 المستخدم: {payment['user_id']}\n\n"
 
-        f"📦 الباقة: "
-        f"{payment['package_name']}\n\n"
+        f"📦 الباقة: {payment['package_name']}\n\n"
 
         f"🎬 تمت إضافة: "
         f"{payment['videos']} فيديو\n\n"
@@ -1569,8 +1282,7 @@ async def approve_payment(
 
         print(
             "USER NOTIFICATION ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
 
 
@@ -1596,17 +1308,13 @@ async def reject_payment(
         return
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT *
         FROM payments
         WHERE id = ?
-        """,
-        (payment_id,)
-    )
+    """, (payment_id,))
 
     payment = cursor.fetchone()
 
@@ -1632,20 +1340,16 @@ async def reject_payment(
 
         return
 
-    cursor.execute(
-        """
+    cursor.execute("""
         UPDATE payments
         SET status = 'rejected'
         WHERE id = ?
         AND status = 'pending'
-        """,
-        (payment_id,)
-    )
+    """, (payment_id,))
 
     changed = cursor.rowcount > 0
 
     connection.commit()
-
     connection.close()
 
     if not changed:
@@ -1663,7 +1367,6 @@ async def reject_payment(
     )
 
     await query.edit_message_text(
-
         f"❌ تم رفض طلب الدفع #{payment_id}."
     )
 
@@ -1690,8 +1393,7 @@ async def reject_payment(
 
         print(
             "REJECT NOTIFICATION ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
 
 
@@ -1716,47 +1418,38 @@ async def admin_panel(
         return
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM users
-        """
-    )
+    """)
 
     users = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM payments
         WHERE status = 'pending'
-        """
-    )
+    """)
 
     pending = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM payments
         WHERE status = 'approved'
-        """
-    )
+    """)
 
     approved = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM users
-        WHERE trial_used = 1
-        """
-    )
+        WHERE free_trial_used = 1
+    """)
 
-    trials_used = cursor.fetchone()["total"]
+    trials = cursor.fetchone()["total"]
 
     connection.close()
 
@@ -1766,17 +1459,13 @@ async def admin_panel(
 
         "👑 لوحة الإدارة\n\n"
 
-        f"👥 المستخدمون: "
-        f"{users}\n"
+        f"👥 المستخدمون: {users}\n"
 
-        f"🎁 التجارب المستخدمة: "
-        f"{trials_used}\n"
+        f"🎁 التجارب المستخدمة: {trials}\n"
 
-        f"⏳ طلبات الدفع المعلقة: "
-        f"{pending}\n"
+        f"⏳ طلبات الدفع المعلقة: {pending}\n"
 
-        f"✅ المدفوعات المؤكدة: "
-        f"{approved}\n\n"
+        f"✅ المدفوعات المؤكدة: {approved}\n\n"
 
         "الأوامر:\n\n"
 
@@ -1820,8 +1509,7 @@ async def admin_add(
     if len(context.args) != 2:
 
         await update.message.reply_text(
-            "الاستخدام:\n"
-            "/add USER_ID AMOUNT"
+            "الاستخدام:\n/add USER_ID AMOUNT"
         )
 
         return
@@ -1847,7 +1535,7 @@ async def admin_add(
         if not user_exists(user_id):
 
             await update.message.reply_text(
-                "❌ هذا المستخدم غير موجود في قاعدة البيانات."
+                "❌ هذا المستخدم غير موجود."
             )
 
             return
@@ -1873,14 +1561,11 @@ async def admin_add(
 
             "✅ تمت إضافة الرصيد.\n\n"
 
-            f"👤 المستخدم: "
-            f"{user_id}\n"
+            f"👤 المستخدم: {user_id}\n"
 
-            f"➕ المضاف: "
-            f"{amount}\n"
+            f"➕ المضاف: {amount}\n"
 
-            f"💰 الرصيد الجديد: "
-            f"{balance}"
+            f"💰 الرصيد الجديد: {balance}"
         )
 
         try:
@@ -1905,8 +1590,7 @@ async def admin_add(
 
             print(
                 "ADD USER NOTIFICATION ERROR:",
-                repr(error),
-                flush=True
+                repr(error)
             )
 
     except ValueError:
@@ -1919,8 +1603,7 @@ async def admin_add(
 
         print(
             "ADMIN ADD ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
 
         await update.message.reply_text(
@@ -1943,8 +1626,7 @@ async def admin_remove(
     if len(context.args) != 2:
 
         await update.message.reply_text(
-            "الاستخدام:\n"
-            "/remove USER_ID AMOUNT"
+            "الاستخدام:\n/remove USER_ID AMOUNT"
         )
 
         return
@@ -1970,7 +1652,7 @@ async def admin_remove(
         if not user_exists(user_id):
 
             await update.message.reply_text(
-                "❌ هذا المستخدم غير موجود في قاعدة البيانات."
+                "❌ المستخدم غير موجود."
             )
 
             return
@@ -1996,14 +1678,11 @@ async def admin_remove(
 
             "✅ تم سحب الرصيد.\n\n"
 
-            f"👤 المستخدم: "
-            f"{user_id}\n"
+            f"👤 المستخدم: {user_id}\n"
 
-            f"➖ المسحوب: "
-            f"{amount}\n"
+            f"➖ المسحوب: {amount}\n"
 
-            f"💰 الرصيد الجديد: "
-            f"{balance}"
+            f"💰 الرصيد الجديد: {balance}"
         )
 
     except ValueError:
@@ -2016,8 +1695,7 @@ async def admin_remove(
 
         print(
             "ADMIN REMOVE ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
 
         await update.message.reply_text(
@@ -2026,7 +1704,7 @@ async def admin_remove(
 
 
 # =========================================================
-# عرض رصيد مستخدم
+# رصيد مستخدم
 # =========================================================
 
 async def admin_balance(
@@ -2040,8 +1718,7 @@ async def admin_balance(
     if len(context.args) != 1:
 
         await update.message.reply_text(
-            "الاستخدام:\n"
-            "/balance USER_ID"
+            "الاستخدام:\n/balance USER_ID"
         )
 
         return
@@ -2066,11 +1743,9 @@ async def admin_balance(
 
         await update.message.reply_text(
 
-            f"👤 المستخدم: "
-            f"{user_id}\n"
+            f"👤 المستخدم: {user_id}\n"
 
-            f"💰 الرصيد: "
-            f"{balance} فيديو"
+            f"💰 الرصيد: {balance} فيديو"
         )
 
     except ValueError:
@@ -2083,8 +1758,7 @@ async def admin_balance(
 
         print(
             "ADMIN BALANCE ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
 
         await update.message.reply_text(
@@ -2105,65 +1779,54 @@ async def admin_stats(
         return
 
     connection = db()
-
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM users
-        """
-    )
+    """)
 
     users = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COALESCE(
             SUM(balance),
             0
         ) AS total
         FROM users
-        """
-    )
+    """)
 
     total_balance = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COALESCE(
             SUM(videos),
             0
         ) AS total
         FROM payments
         WHERE status = 'approved'
-        """
-    )
+    """)
 
     sold = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COALESCE(
             SUM(price),
             0
         ) AS total
         FROM payments
         WHERE status = 'approved'
-        """
-    )
+    """)
 
     revenue = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM users
-        WHERE trial_used = 1
-        """
-    )
+        WHERE free_trial_used = 1
+    """)
 
-    trials_used = cursor.fetchone()["total"]
+    trials = cursor.fetchone()["total"]
 
     connection.close()
 
@@ -2171,17 +1834,13 @@ async def admin_stats(
 
         "📊 إحصائيات البوت\n\n"
 
-        f"👥 المستخدمون: "
-        f"{users}\n\n"
+        f"👥 المستخدمون: {users}\n\n"
 
-        f"🎁 التجارب المستخدمة: "
-        f"{trials_used}\n\n"
+        f"🎁 التجارب المجانية المستخدمة: {trials}\n\n"
 
-        f"💰 الأرصدة الحالية: "
-        f"{total_balance}\n\n"
+        f"💰 الأرصدة الحالية: {total_balance}\n\n"
 
-        f"🎬 الفيديوهات المباعة: "
-        f"{sold}\n\n"
+        f"🎬 الفيديوهات المباعة: {sold}\n\n"
 
         f"💵 إجمالي المبيعات: "
         f"{revenue:,} ل.س"
@@ -2203,7 +1862,7 @@ async def handle_photo(
         update.effective_user
     )
 
-    # إثبات دفع
+    # أولاً: هل هذه صورة إثبات دفع؟
     if await handle_payment_proof(
         update,
         context
@@ -2215,61 +1874,6 @@ async def handle_photo(
         user_id,
         {}
     )
-
-    # -----------------------------------------------------
-    # إذا كانت تجربة مجانية
-    # -----------------------------------------------------
-
-    is_trial = state.get(
-        "free_trial",
-        False
-    )
-
-    # -----------------------------------------------------
-    # إذا لا توجد تجربة ولا رصيد
-    # -----------------------------------------------------
-
-    if not is_trial:
-
-        balance = get_balance(
-            user_id
-        )
-
-        if balance <= 0:
-
-            await update.message.reply_text(
-
-                "💳 لا يوجد لديك رصيد كافٍ.\n\n"
-
-                "🎁 إذا لم تستخدم تجربتك المجانية "
-                "يمكنك استخدامها الآن.\n\n"
-
-                "أو اشترِ رصيدًا لإنشاء الفيديوهات.",
-
-                reply_markup=InlineKeyboardMarkup([
-
-                    [
-                        InlineKeyboardButton(
-                            "🎁 التجربة المجانية",
-                            callback_data="new_video"
-                        )
-                    ],
-
-                    [
-                        InlineKeyboardButton(
-                            "💰 شراء رصيد",
-                            callback_data="buy"
-                        )
-                    ]
-
-                ])
-            )
-
-            return
-
-    # -----------------------------------------------------
-    # التأكد من مرحلة الصورة
-    # -----------------------------------------------------
 
     if not state.get(
         "waiting_for_photo"
@@ -2287,41 +1891,77 @@ async def handle_photo(
 
         return
 
+    # السماح بالتجربة المجانية أو الرصيد
+    trial_available = not has_free_trial(
+        user_id
+    )
+
+    balance = get_balance(
+        user_id
+    )
+
+    if not trial_available and balance <= 0:
+
+        await update.message.reply_text(
+
+            "💳 لا يوجد لديك رصيد كافٍ.\n\n"
+
+            "لقد استخدمت تجربتك المجانية.\n"
+            "اشترِ رصيداً لإنشاء فيديو جديد.",
+
+            reply_markup=InlineKeyboardMarkup([
+
+                [
+                    InlineKeyboardButton(
+                        "💰 شراء رصيد",
+                        callback_data="buy"
+                    )
+                ],
+
+                [
+                    InlineKeyboardButton(
+                        "⬅️ الرئيسية",
+                        callback_data="back_main"
+                    )
+                ]
+
+            ])
+        )
+
+        return
+
     photo = update.message.photo[-1]
+
+    temp_image_path = None
 
     try:
 
         telegram_file = await photo.get_file()
 
-        image_bytes = (
-            await telegram_file.download_as_bytearray()
+        with tempfile.NamedTemporaryFile(
+            suffix=".jpg",
+            delete=False
+        ) as temp_file:
+
+            temp_image_path = temp_file.name
+
+        await telegram_file.download_to_drive(
+            custom_path=temp_image_path
         )
 
         duration = state.get(
             "duration",
-            5
+            DEFAULT_DURATION
         )
 
-        resolution = state.get(
-            "resolution",
-            "480p"
-        )
-
-        # -------------------------------------------------
-        # التجربة المجانية دائماً 3 ثواني
-        # -------------------------------------------------
-
-        if state.get(
-            "free_trial",
-            False
-        ):
-
-            duration = FREE_TRIAL_DURATION
+        # إذا كانت تجربة مجانية، نجبرها على 3 ثوانٍ
+        if trial_available:
+            duration = 3
 
         user_states[user_id] = {
 
-            "image":
-                bytes(image_bytes),
+            "image_path":
+                temp_image_path,
 
             "waiting_for_prompt":
                 True,
@@ -2332,65 +1972,52 @@ async def handle_photo(
             "duration":
                 duration,
 
-            "resolution":
-                resolution,
-
-            "free_trial":
-                state.get(
-                    "free_trial",
-                    False
-                ),
+            "is_free_trial":
+                trial_available,
         }
 
-        if state.get(
-            "free_trial",
-            False
-        ):
+        if trial_available:
 
-            message = (
+            await update.message.reply_text(
 
-                "🎁 تم تفعيل التجربة المجانية!\n\n"
+                "🎁 هذه تجربتك المجانية!\n\n"
 
-                "✅ وصلت الصورة.\n\n"
+                "⏱️ المدة: 3 ثوانٍ\n\n"
 
-                "✍️ الآن اكتب وصف الحركة.\n\n"
-
-                "⏱️ مدة التجربة: 3 ثوانٍ\n\n"
-
-                "مثال:\n"
-
-                "اجعل الشخص يبتسم ويحرك رأسه "
-                "ببطء مع حركة كاميرا سينمائية "
-                "خفيفة، مع الحفاظ على ملامح الوجه."
+                "✍️ الآن اكتب وصف الحركة التي تريدها."
             )
 
         else:
 
-            message = (
+            await update.message.reply_text(
 
                 "✅ وصلت الصورة!\n\n"
 
+                f"⏱️ المدة: {duration} ثوانٍ\n\n"
+
                 "✍️ الآن اكتب وصف الحركة التي تريدها.\n\n"
 
-                "مثال:\n\n"
-
+                "مثال:\n"
                 "اجعل الشخص يبتسم ويحرك رأسه "
                 "ببطء مع حركة كاميرا سينمائية "
-                "خفيفة، وحافظ على ملامح الوجه "
-                "كما هي."
+                "خفيفة، وحافظ على ملامح الوجه."
             )
-
-        await update.message.reply_text(
-            message
-        )
 
     except Exception as error:
 
         print(
             "PHOTO ERROR:",
-            repr(error),
-            flush=True
+            repr(error)
         )
+
+        if temp_image_path:
+
+            try:
+                os.remove(
+                    temp_image_path
+                )
+            except Exception:
+                pass
 
         await update.message.reply_text(
             "❌ حدث خطأ أثناء استقبال الصورة."
@@ -2441,7 +2068,7 @@ async def handle_text(
 
         return
 
-    if "image" not in state:
+    if "image_path" not in state:
 
         await update.message.reply_text(
 
@@ -2468,28 +2095,15 @@ async def handle_text(
 
     state["waiting_for_prompt"] = False
 
-    is_trial = state.get(
-        "free_trial",
-        False
+    duration = state.get(
+        "duration",
+        DEFAULT_DURATION
     )
 
-    if is_trial:
-
-        duration_text = (
-            "⏱️ المدة: 3 ثواني\n"
-            "🎁 هذه تجربة مجانية"
-        )
-
-    else:
-
-        duration_text = (
-
-            f"⏱️ المدة: "
-            f"{state.get('duration', 5)} ثواني\n"
-
-            f"📺 الدقة: "
-            f"{state.get('resolution', '480p')}"
-        )
+    if state.get(
+        "is_free_trial"
+    ):
+        duration = 3
 
     keyboard = [
 
@@ -2516,24 +2130,30 @@ async def handle_text(
 
     ]
 
+    if state.get("is_free_trial"):
+
+        balance_text = (
+            "🎁 تجربة مجانية — 3 ثوانٍ"
+        )
+
+    else:
+
+        balance_text = (
+            f"💰 رصيدك: "
+            f"{get_balance(user_id)} فيديو"
+        )
+
     await update.message.reply_text(
 
         "📝 تم استلام وصف الحركة:\n\n"
 
         f"{prompt}\n\n"
 
-        f"{duration_text}\n\n"
+        f"⏱️ المدة: {duration} ثواني\n\n"
 
-        + (
-            "🎁 لن يتم خصم أي رصيد من التجربة المجانية."
-            if is_trial
-            else
-            f"💰 رصيدك الحالي: "
-            f"{get_balance(user_id)} فيديو"
-        )
-        +
+        f"{balance_text}\n\n"
 
-        "\n\nاضغط «إنشاء الفيديو» للبدء.",
+        "اضغط «إنشاء الفيديو» للبدء.",
 
         reply_markup=InlineKeyboardMarkup(
             keyboard
@@ -2552,36 +2172,9 @@ async def generate_video(
 
     query = update.callback_query
 
-    user_id = query.from_user.id
-
-    print(
-        "\n" + "=" * 70,
-        flush=True
-    )
-
-    print(
-        "🎬 GENERATE VIDEO START",
-        flush=True
-    )
-
-    print(
-        "USER ID:",
-        user_id,
-        flush=True
-    )
-
-    print(
-        "CALLBACK:",
-        query.data,
-        flush=True
-    )
-
-    print(
-        "=" * 70,
-        flush=True
-    )
-
     await query.answer()
+
+    user_id = query.from_user.id
 
     lock = get_generation_lock(
         user_id
@@ -2591,11 +2184,6 @@ async def generate_video(
         blocking=False
     ):
 
-        print(
-            "❌ GENERATION LOCK ACTIVE",
-            flush=True
-        )
-
         await query.answer(
             "⏳ يوجد فيديو قيد الإنشاء بالفعل.",
             show_alert=True
@@ -2603,428 +2191,233 @@ async def generate_video(
 
         return
 
+    image_path = None
+    is_trial = False
+    trial_marked = False
+    charged = False
+
     try:
-
-        # =================================================
-        # STEP 1
-        # =================================================
-
-        print(
-            "STEP 1: Reading user state...",
-            flush=True
-        )
 
         state = user_states.get(
             user_id,
             {}
         )
 
-        print(
-            "STATE KEYS:",
-            list(state.keys()),
-            flush=True
+        image_path = state.get(
+            "image_path"
         )
 
-        is_trial = state.get(
-            "free_trial",
-            False
+        prompt = state.get(
+            "prompt"
         )
 
-        print(
-            "FREE TRIAL:",
-            is_trial,
-            flush=True
+        is_trial = bool(
+            state.get(
+                "is_free_trial",
+                False
+            )
         )
 
-        balance = get_balance(
-            user_id
+        duration = state.get(
+            "duration",
+            DEFAULT_DURATION
         )
-
-        print(
-            "BALANCE:",
-            balance,
-            flush=True
-        )
-
-        # =================================================
-        # التحقق من الرصيد أو التجربة
-        # =================================================
-
-        if not is_trial and balance <= 0:
-
-            print(
-                "❌ NO BALANCE AND NO TRIAL",
-                flush=True
-            )
-
-            await query.edit_message_text(
-
-                "💳 لا يوجد رصيد كافٍ.\n\n"
-
-                "اشترِ رصيدًا للمتابعة.",
-
-                reply_markup=InlineKeyboardMarkup([
-
-                    [
-                        InlineKeyboardButton(
-                            "💰 شراء رصيد",
-                            callback_data="buy"
-                        )
-                    ]
-
-                ])
-            )
-
-            return
-
-        # =================================================
-        # التحقق من الصورة والوصف
-        # =================================================
-
-        if "image" not in state:
-
-            print(
-                "❌ IMAGE MISSING",
-                flush=True
-            )
-
-            await query.edit_message_text(
-                "❌ الصورة غير موجودة. أرسل الصورة من جديد."
-            )
-
-            return
-
-        if "prompt" not in state:
-
-            print(
-                "❌ PROMPT MISSING",
-                flush=True
-            )
-
-            await query.edit_message_text(
-                "❌ وصف الحركة غير موجود. اكتب الوصف من جديد."
-            )
-
-            return
-
-        # =================================================
-        # الإعدادات
-        # =================================================
 
         if is_trial:
 
-            duration = FREE_TRIAL_DURATION
+            duration = 3
+
+        if duration not in ALLOWED_DURATIONS:
+
+            duration = DEFAULT_DURATION
+
+        # =============================================
+        # التحقق من البيانات
+        # =============================================
+
+        if not image_path or not os.path.exists(
+            image_path
+        ):
+
+            await query.edit_message_text(
+
+                "❌ لم أجد الصورة.\n\n"
+                "أرسل صورة جديدة وحاول مرة أخرى.",
+
+                reply_markup=main_menu(
+                    user_id
+                )
+            )
+
+            return
+
+        if not prompt:
+
+            await query.edit_message_text(
+
+                "❌ لم يتم العثور على وصف الحركة.",
+
+                reply_markup=main_menu(
+                    user_id
+                )
+            )
+
+            return
+
+        # =============================================
+        # التحقق من التجربة أو الرصيد
+        # =============================================
+
+        if is_trial:
+
+            # حماية إضافية
+            if has_free_trial(
+                user_id
+            ):
+
+                await query.edit_message_text(
+
+                    "⚠️ تم استخدام التجربة المجانية مسبقاً.",
+
+                    reply_markup=main_menu(
+                        user_id
+                    )
+                )
+
+                return
 
         else:
 
-            duration = state.get(
-                "duration",
-                5
+            balance = get_balance(
+                user_id
             )
 
-        resolution = state.get(
-            "resolution",
-            "480p"
-        )
+            if balance <= 0:
 
-        prompt = state["prompt"]
+                await query.edit_message_text(
 
-        image_bytes = state["image"]
+                    "💳 لا يوجد رصيد كافٍ.\n\n"
 
-        print(
-            "STEP 2: Settings",
-            flush=True
-        )
+                    "اشترِ رصيداً أولاً.",
 
-        print(
-            "DURATION:",
-            duration,
-            flush=True
-        )
+                    reply_markup=InlineKeyboardMarkup([
 
-        print(
-            "RESOLUTION:",
-            resolution,
-            flush=True
-        )
+                        [
+                            InlineKeyboardButton(
+                                "💰 شراء رصيد",
+                                callback_data="buy"
+                            )
+                        ]
 
-        print(
-            "PROMPT:",
-            prompt,
-            flush=True
-        )
+                    ])
+                )
 
-        print(
-            "IMAGE SIZE:",
-            len(image_bytes),
-            "bytes",
-            flush=True
-        )
+                return
 
-        # =================================================
+        # =============================================
         # رسالة البداية
-        # =================================================
+        # =============================================
 
         if is_trial:
 
-            start_message = (
+            await query.edit_message_text(
 
-                "🎁 جاري إنشاء تجربتك المجانية...\n\n"
+                "🎁 جاري تشغيل تجربتك المجانية...\n\n"
 
-                "📤 جاري رفع الصورة...\n"
+                "🤖 Wan 2.2 14B\n"
+                "⚡ Lightning LoRA\n\n"
 
-                "⏱️ المدة: 3 ثواني\n\n"
+                "⏱️ المدة: 3 ثوانٍ\n\n"
 
-                "💳 لن يتم خصم أي رصيد."
+                "قد يستغرق التوليد بعض الوقت."
             )
 
         else:
 
-            start_message = (
+            await query.edit_message_text(
 
                 "⏳ جاري إنشاء الفيديو...\n\n"
 
-                "📤 جاري رفع الصورة...\n"
+                "🤖 Wan 2.2 14B\n"
+                "⚡ Lightning LoRA\n\n"
 
-                f"⏱️ المدة: {duration} ثواني\n"
+                f"⏱️ المدة: {duration} ثوانٍ\n\n"
 
-                f"📺 الدقة: {resolution}\n\n"
-
-                "يرجى الانتظار..."
+                "قد يستغرق التوليد بعض الوقت."
             )
 
-        await query.edit_message_text(
-            start_message
-        )
+        # =============================================
+        # تشغيل Gradio في thread
+        # حتى لا يتجمد Telegram
+        # =============================================
 
-        # =================================================
-        # STEP 3
-        # رابط رفع الصورة
-        # =================================================
+        try:
 
-        print(
-            "STEP 3: Requesting Magic Hour upload URL...",
-            flush=True
-        )
+            video_path = await asyncio.to_thread(
 
-        upload_url, file_path = create_upload_url(
-            "jpg"
-        )
+                generate_wan_video,
 
-        print(
-            "✅ UPLOAD URL RECEIVED",
-            flush=True
-        )
+                image_path,
 
-        print(
-            "FILE PATH:",
-            file_path,
-            flush=True
-        )
+                prompt,
 
-        # =================================================
-        # STEP 4
-        # رفع الصورة
-        # =================================================
-
-        print(
-            "STEP 4: Uploading image...",
-            flush=True
-        )
-
-        upload_image(
-            upload_url,
-            image_bytes
-        )
-
-        print(
-            "✅ IMAGE UPLOADED SUCCESSFULLY",
-            flush=True
-        )
-
-        await query.edit_message_text(
-
-            "⏳ جاري إنشاء الفيديو...\n\n"
-
-            "✅ تم رفع الصورة.\n"
-
-            "🤖 جاري إرسال الطلب إلى Magic Hour...\n\n"
-
-            + (
-                "🎁 التجربة المجانية — 3 ثواني"
-                if is_trial
-                else
-                f"⏱️ {duration} ثواني — {resolution}"
+                duration
             )
-        )
 
-        # =================================================
-        # STEP 5
-        # إنشاء الفيديو
-        # =================================================
+        except Exception as error:
 
-        print(
-            "STEP 5: Creating Magic Hour video...",
-            flush=True
-        )
-
-        video_data = create_video(
-
-            file_path=file_path,
-
-            prompt=prompt,
-
-            duration=duration,
-
-            resolution=resolution
-        )
-
-        print(
-            "✅ MAGIC HOUR VIDEO RESPONSE:",
-            video_data,
-            flush=True
-        )
-
-        video_id = video_data.get(
-            "id"
-        )
-
-        if not video_id:
-
-            print(
-                "❌ NO VIDEO ID",
-                flush=True
-            )
+            print("=" * 60)
+            print("❌❌❌ WAN GENERATION ERROR")
+            print("ERROR TYPE:", type(error).__name__)
+            print("ERROR:", repr(error))
+            print("=" * 60)
 
             await query.edit_message_text(
-                "❌ Magic Hour لم يرجع رقم الفيديو."
+
+                "❌ تعذر إنشاء الفيديو.\n\n"
+
+                "حدث خطأ أثناء الاتصال بـ Wan 2.2 "
+                "أو أثناء التوليد.\n\n"
+
+                "💳 لم يتم خصم أي رصيد.\n\n"
+
+                "يمكنك المحاولة مرة أخرى."
             )
 
             return
 
-        print(
-            "VIDEO ID:",
-            video_id,
-            flush=True
-        )
+        # =============================================
+        # التأكد من الفيديو
+        # =============================================
 
-        # =================================================
-        # STEP 6
-        # الانتظار
-        # =================================================
-
-        await query.edit_message_text(
-
-            "⏳ الفيديو قيد المعالجة...\n\n"
-
-            "🎬 Magic Hour يعمل على إنشاء الفيديو.\n\n"
-
-            + (
-                "🎁 تجربة مجانية — 3 ثواني"
-                if is_trial
-                else
-                "💳 سيتم الخصم فقط بعد نجاح العملية."
-            )
-        )
-
-        print(
-            "STEP 6: Waiting for video...",
-            flush=True
-        )
-
-        video_url, final_data = wait_for_video(
-            video_id
-        )
-
-        print(
-            "FINAL VIDEO URL:",
-            video_url,
-            flush=True
-        )
-
-        print(
-            "FINAL DATA:",
-            final_data,
-            flush=True
-        )
-
-        if not video_url:
+        if not video_path:
 
             await query.edit_message_text(
 
-                "❌ لم يتم إنشاء الفيديو.\n\n"
+                "❌ لم يتم الحصول على فيديو من Wan 2.2.\n\n"
 
-                + (
-                    "🎁 لم يتم استهلاك التجربة المجانية."
-                    if is_trial
-                    else
-                    "💳 لم يتم خصم الرصيد."
-                )
-                +
-
-                "\n\nيمكنك المحاولة مرة أخرى."
+                "💳 لم يتم خصم الرصيد."
             )
 
             return
 
-        # =================================================
-        # STEP 7
-        # تحميل الفيديو
-        # =================================================
+        if not os.path.exists(video_path):
 
-        await query.edit_message_text(
+            await query.edit_message_text(
 
-            "✅ تم إنشاء الفيديو!\n\n"
+                "❌ ملف الفيديو غير موجود.\n\n"
 
-            "📥 جاري تحميله وإرساله إليك..."
-        )
-
-        print(
-            "STEP 7: Downloading video...",
-            flush=True
-        )
-
-        video_response = requests.get(
-
-            video_url,
-
-            timeout=180
-        )
-
-        print(
-            "DOWNLOAD STATUS:",
-            video_response.status_code,
-            flush=True
-        )
-
-        video_response.raise_for_status()
-
-        video_bytes = video_response.content
-
-        print(
-            "VIDEO SIZE:",
-            len(video_bytes),
-            "bytes",
-            flush=True
-        )
-
-        if not video_bytes:
-
-            raise RuntimeError(
-                "Downloaded video is empty"
+                "💳 لم يتم خصم الرصيد."
             )
 
-        # =================================================
-        # STEP 8
-        # التعامل مع الرصيد / التجربة
-        # =================================================
+            return
+
+        # =============================================
+        # تجربة مجانية:
+        # نعلّمها كمستخدمة فقط بعد نجاح التوليد
+        # =============================================
 
         if is_trial:
-
-            print(
-                "STEP 8: Marking free trial as used...",
-                flush=True
-            )
 
             trial_marked = mark_free_trial_used(
                 user_id
@@ -3033,43 +2426,28 @@ async def generate_video(
             if not trial_marked:
 
                 print(
-                    "⚠️ FREE TRIAL WAS ALREADY USED",
-                    flush=True
+                    "WARNING: Could not mark free trial."
                 )
 
-                # لا نسمح بتحويل محاولة مجانية ثانية
-                # إلى تجربة مجانية بالخطأ.
-
+                # لا نرسل الفيديو إذا لم نتمكن
+                # من تسجيل التجربة
                 await query.edit_message_text(
 
-                    "⚠️ حدث تعارض في حالة التجربة المجانية.\n\n"
+                    "⚠️ تم إنشاء الفيديو، "
+                    "لكن حدث خطأ في تسجيل التجربة المجانية.\n\n"
 
+                    "تم إيقاف الإرسال لحماية النظام.\n"
                     "تواصل مع الإدارة."
                 )
 
                 return
 
-            new_balance = get_balance(
-                user_id
-            )
+        # =============================================
+        # الفيديو المدفوع:
+        # الخصم فقط بعد نجاح التوليد
+        # =============================================
 
-            print(
-                "FREE TRIAL SUCCESSFULLY CONSUMED",
-                flush=True
-            )
-
-            print(
-                "BALANCE REMAINS:",
-                new_balance,
-                flush=True
-            )
-
-        else:
-
-            print(
-                "STEP 8: Removing one paid credit...",
-                flush=True
-            )
+        if not is_trial:
 
             removed = remove_balance(
                 user_id,
@@ -3079,8 +2457,8 @@ async def generate_video(
             if not removed:
 
                 print(
-                    "❌ BALANCE DEDUCTION FAILED",
-                    flush=True
+                    "BALANCE DEDUCTION FAILED:",
+                    user_id
                 )
 
                 await query.edit_message_text(
@@ -3088,91 +2466,79 @@ async def generate_video(
                     "⚠️ تم إنشاء الفيديو، "
                     "لكن تعذر خصم الرصيد.\n\n"
 
-                    "تم إيقاف العملية لحماية رصيدك.\n\n"
+                    "تم إيقاف إرسال الفيديو لحماية النظام.\n\n"
 
                     "تواصل مع الإدارة."
                 )
 
                 return
 
-            new_balance = get_balance(
-                user_id
-            )
+            charged = True
 
-            print(
-                "NEW BALANCE:",
-                new_balance,
-                flush=True
-            )
+        # =============================================
+        # إرسال الفيديو
+        # =============================================
 
-        # =================================================
-        # STEP 9
-        # إرسال الفيديو إلى Telegram
-        # =================================================
+        await query.edit_message_text(
 
-        print(
-            "STEP 9: Sending video to Telegram...",
-            flush=True
+            "✅ تم إنشاء الفيديو!\n\n"
+
+            "📤 جاري إرساله إليك..."
         )
-
-        if is_trial:
-
-            caption = (
-
-                "🎉 تم إنشاء تجربتك المجانية بنجاح!\n\n"
-
-                "🎁 التجربة: 3 ثواني\n"
-
-                "💳 لم يتم خصم أي رصيد.\n\n"
-
-                "⭐ يمكنك الآن شراء رصيد لإنشاء المزيد من الفيديوهات."
-            )
-
-        else:
-
-            caption = (
-
-                "🎬 تم إنشاء الفيديو بنجاح!\n\n"
-
-                "💳 تم خصم فيديو واحد.\n"
-
-                f"💰 رصيدك المتبقي: "
-                f"{new_balance} فيديو"
-            )
 
         try:
 
-            await context.bot.send_video(
+            with open(
+                video_path,
+                "rb"
+            ) as video_file:
 
-                chat_id=user_id,
+                if is_trial:
 
-                video=video_bytes,
+                    caption = (
+                        "🎁 انتهت تجربتك المجانية!\n\n"
+                        "🎬 تم إنشاء الفيديو بنجاح.\n"
+                        "⏱️ المدة: 3 ثوانٍ\n\n"
+                        "💡 يمكنك الآن شراء رصيد "
+                        "لإنشاء المزيد من الفيديوهات."
+                    )
 
-                caption=caption
-            )
+                else:
 
-            print(
-                "✅ VIDEO SENT TO TELEGRAM",
-                flush=True
-            )
+                    new_balance = get_balance(
+                        user_id
+                    )
+
+                    caption = (
+
+                        "🎬 تم إنشاء الفيديو بنجاح!\n\n"
+
+                        "💳 تم خصم فيديو واحد.\n"
+
+                        f"💰 رصيدك المتبقي: "
+                        f"{new_balance} فيديو"
+                    )
+
+                await context.bot.send_video(
+
+                    chat_id=user_id,
+
+                    video=video_file,
+
+                    caption=caption,
+
+                    supports_streaming=True
+                )
 
         except Exception as send_error:
 
             print(
-                "❌ VIDEO SEND ERROR:",
-                repr(send_error),
-                flush=True
+                "VIDEO SEND ERROR:",
+                repr(send_error)
             )
 
-            # -------------------------------------------------
-            # مهم:
-            #
-            # في التجربة المجانية تم تسجيلها قبل الإرسال.
-            # في الدفع تم الخصم قبل الإرسال.
-            #
-            # لذلك لا نعيد الرصيد تلقائياً.
-            # -------------------------------------------------
-
+            # إذا كان مدفوعاً والخصم تم،
+            # لا نعيده تلقائياً لتجنب مشاكل الخصم المزدوج.
             try:
 
                 await context.bot.send_message(
@@ -3181,18 +2547,20 @@ async def generate_video(
 
                     text=(
 
-                        "⚠️ تنبيه إداري\n\n"
+                        "⚠️ تنبيه مهم\n\n"
 
                         "تم إنشاء فيديو بنجاح، "
-                        "لكن فشل إرساله إلى المستخدم.\n\n"
+                        "لكن تعذر إرساله للمستخدم.\n\n"
 
                         f"👤 المستخدم: {user_id}\n"
 
                         f"🎁 تجربة مجانية: "
                         f"{'نعم' if is_trial else 'لا'}\n"
 
-                        f"💰 الرصيد الحالي: "
-                        f"{new_balance}"
+                        f"💳 تم الخصم: "
+                        f"{'نعم' if charged else 'لا'}\n\n"
+
+                        "يرجى مراجعة الحالة."
                     )
                 )
 
@@ -3209,33 +2577,21 @@ async def generate_video(
 
             return
 
-        # =================================================
-        # STEP 10
-        # تنظيف الحالة
-        # =================================================
-
-        user_states.pop(
-            user_id,
-            None
-        )
-
-        print(
-            "STEP 10: State cleaned.",
-            flush=True
-        )
+        # =============================================
+        # نجاح كامل
+        # =============================================
 
         if is_trial:
 
             await query.edit_message_text(
 
-                "🎉 تمت التجربة المجانية بنجاح!\n\n"
+                "🎉 تم إنشاء تجربتك المجانية وإرسالها!\n\n"
 
-                "🎁 حصلت على فيديو مجاني لمدة 3 ثوانٍ.\n"
+                "🎁 كانت هذه التجربة المجانية الوحيدة "
+                "المخصصة لحسابك.\n\n"
 
-                "💳 لم يتم خصم أي رصيد.\n\n"
-
-                "🔥 لإنشاء فيديوهات إضافية، "
-                "يمكنك شراء إحدى الباقات.",
+                "💰 لعمل فيديوهات إضافية، "
+                "اشترِ إحدى الباقات.",
 
                 reply_markup=main_menu(
                     user_id
@@ -3243,6 +2599,10 @@ async def generate_video(
             )
 
         else:
+
+            new_balance = get_balance(
+                user_id
+            )
 
             await query.edit_message_text(
 
@@ -3256,133 +2616,43 @@ async def generate_video(
                 )
             )
 
-        print(
-            "🎉 GENERATION COMPLETE",
-            flush=True
-        )
-
-    except requests.HTTPError as error:
-
-        print(
-            "\n" + "❌" * 20,
-            flush=True
-        )
-
-        print(
-            "HTTP ERROR",
-            flush=True
-        )
-
-        print(
-            "ERROR TYPE:",
-            type(error).__name__,
-            flush=True
-        )
-
-        print(
-            "ERROR:",
-            repr(error),
-            flush=True
-        )
-
-        if error.response is not None:
-
-            print(
-                "API STATUS:",
-                error.response.status_code,
-                flush=True
-            )
-
-            print(
-                "API RESPONSE:",
-                error.response.text,
-                flush=True
-            )
-
-        print(
-            "❌" * 20,
-            flush=True
-        )
-
-        # لا نستهلك التجربة عند فشل API
-        # ولا نخصم الرصيد.
-
-        await query.edit_message_text(
-
-            "❌ Magic Hour رفض الطلب أو حدث خطأ في الاتصال.\n\n"
-
-            + (
-                "🎁 لم يتم استهلاك التجربة المجانية."
-                if is_trial
-                else
-                "💳 لم يتم خصم الرصيد."
-            )
-            +
-
-            "\n\n"
-            "يمكنك المحاولة مرة أخرى."
-        )
-
-    except Exception as error:
-
-        print(
-            "\n" + "❌" * 20,
-            flush=True
-        )
-
-        print(
-            "GENERAL GENERATION ERROR",
-            flush=True
-        )
-
-        print(
-            "ERROR TYPE:",
-            type(error).__name__,
-            flush=True
-        )
-
-        print(
-            "ERROR:",
-            repr(error),
-            flush=True
-        )
-
-        traceback.print_exc()
-
-        print(
-            "❌" * 20,
-            flush=True
-        )
-
-        await query.edit_message_text(
-
-            "❌ حدث خطأ أثناء إنشاء الفيديو.\n\n"
-
-            + (
-                "🎁 لم يتم استهلاك التجربة المجانية."
-                if is_trial
-                else
-                "💳 لم يتم خصم الرصيد."
-            )
-            +
-
-            "\n\n"
-            "يمكنك المحاولة مرة أخرى."
+        # تنظيف الحالة
+        user_states.pop(
+            user_id,
+            None
         )
 
     finally:
 
-        try:
+        # حذف صورة المستخدم المؤقتة
+        if image_path:
 
+            try:
+
+                if os.path.exists(
+                    image_path
+                ):
+
+                    os.remove(
+                        image_path
+                    )
+
+            except Exception as error:
+
+                print(
+                    "TEMP IMAGE DELETE ERROR:",
+                    repr(error)
+                )
+
+        try:
             lock.release()
+
+            print(
+                "🔓 GENERATION LOCK RELEASED"
+            )
 
         except Exception:
             pass
-
-        print(
-            "🔓 GENERATION LOCK RELEASED",
-            flush=True
-        )
 
 
 # =========================================================
@@ -3418,7 +2688,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # اختيار الباقة
+    # الباقة
     # =====================================================
 
     if data.startswith(
@@ -3510,7 +2780,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # لوحة الإدارة
+    # الإدارة
     # =====================================================
 
     if data == "admin":
@@ -3530,67 +2800,23 @@ async def button_handler(
 
         await query.answer()
 
+        trial_available = not has_free_trial(
+            user_id
+        )
+
         balance = get_balance(
             user_id
         )
 
-        trial_available = has_free_trial(
-            user_id
-        )
-
-        # -------------------------------------------------
-        # تحديد هل المستخدم سيستخدم التجربة أم الرصيد
-        # -------------------------------------------------
-
-        if trial_available:
-
-            is_trial = True
-
-            duration = FREE_TRIAL_DURATION
-
-            resolution = "480p"
-
-            user_states[user_id] = {
-
-                "waiting_for_photo":
-                    True,
-
-                "duration":
-                    duration,
-
-                "resolution":
-                    resolution,
-
-                "free_trial":
-                    True,
-            }
-
-            await query.edit_message_text(
-
-                "🎁 تجربتك المجانية جاهزة!\n\n"
-
-                "📷 أرسل صورة الآن.\n\n"
-
-                "⏱️ مدة الفيديو: 3 ثواني\n"
-
-                "💳 لن يتم خصم أي رصيد.\n\n"
-
-                "⭐ هذه التجربة متاحة مرة واحدة فقط."
-            )
-
-            return
-
-        # -------------------------------------------------
-        # لا توجد تجربة
-        # -------------------------------------------------
-
-        if balance <= 0:
+        if not trial_available and balance <= 0:
 
             await query.edit_message_text(
 
                 "💳 رصيدك صفر.\n\n"
 
-                "اشترِ رصيدًا لإنشاء الفيديوهات.",
+                "🎁 لقد استخدمت تجربتك المجانية.\n\n"
+
+                "اشترِ رصيداً لإنشاء فيديو جديد.",
 
                 reply_markup=InlineKeyboardMarkup([
 
@@ -3613,10 +2839,7 @@ async def button_handler(
 
             return
 
-        # -------------------------------------------------
-        # فيديو مدفوع
-        # -------------------------------------------------
-
+        # الحفاظ على الإعدادات
         old_state = user_states.get(
             user_id,
             {}
@@ -3624,13 +2847,11 @@ async def button_handler(
 
         duration = old_state.get(
             "duration",
-            5
+            DEFAULT_DURATION
         )
 
-        resolution = old_state.get(
-            "resolution",
-            "480p"
-        )
+        if duration not in ALLOWED_DURATIONS:
+            duration = DEFAULT_DURATION
 
         user_states[user_id] = {
 
@@ -3640,27 +2861,37 @@ async def button_handler(
             "duration":
                 duration,
 
-            "resolution":
-                resolution,
-
-            "free_trial":
-                False,
+            "is_free_trial":
+                trial_available,
         }
 
-        await query.edit_message_text(
+        if trial_available:
 
-            "📷 أرسل الصورة التي تريد "
-            "تحويلها إلى فيديو.\n\n"
+            await query.edit_message_text(
 
-            f"💰 رصيدك: "
-            f"{balance} فيديو\n\n"
+                "🎁 لديك تجربة مجانية!\n\n"
 
-            f"⏱️ المدة: "
-            f"{duration} ثواني\n"
+                "📷 أرسل الصورة التي تريد "
+                "تحويلها إلى فيديو.\n\n"
 
-            f"📺 الدقة: "
-            f"{resolution}"
-        )
+                "⏱️ التجربة المجانية = 3 ثوانٍ\n\n"
+
+                "⚡ Wan 2.2 14B"
+            )
+
+        else:
+
+            await query.edit_message_text(
+
+                "📷 أرسل الصورة التي تريد "
+                "تحويلها إلى فيديو.\n\n"
+
+                f"💰 رصيدك: {balance} فيديو\n\n"
+
+                f"⏱️ المدة: {duration} ثوانٍ\n\n"
+
+                "⚡ Wan 2.2 14B"
+            )
 
         return
 
@@ -3676,31 +2907,26 @@ async def button_handler(
             user_id
         )
 
-        trial_available = has_free_trial(
+        trial_used = has_free_trial(
             user_id
         )
 
-        if trial_available:
-
-            trial_status = (
-                "🎁 التجربة المجانية: متاحة\n"
-                "⏱️ 3 ثواني"
-            )
-
-        else:
-
-            trial_status = (
-                "🎁 التجربة المجانية: مستخدمة"
-            )
+        trial_text = (
+            "❌ مستخدمة"
+            if trial_used
+            else
+            "🎁 متاحة — 3 ثوانٍ"
+        )
 
         await query.edit_message_text(
 
-            "💳 حسابك\n\n"
+            "💳 معلومات رصيدك:\n\n"
 
             f"🎬 الرصيد المدفوع: "
             f"{balance} فيديو\n\n"
 
-            f"{trial_status}",
+            f"🎁 التجربة المجانية: "
+            f"{trial_text}",
 
             reply_markup=main_menu(
                 user_id
@@ -3722,49 +2948,20 @@ async def button_handler(
             user_id,
 
             {
-                "duration": 5,
-                "resolution": "480p"
+                "duration":
+                    DEFAULT_DURATION
             }
         )
 
         if "duration" not in state:
-            state["duration"] = 5
-
-        if "resolution" not in state:
-            state["resolution"] = "480p"
-
-        # لا نسمح بتغيير مدة التجربة
-        if state.get(
-            "free_trial",
-            False
-        ):
-
-            await query.edit_message_text(
-
-                "🎁 أنت حالياً في التجربة المجانية.\n\n"
-
-                "⏱️ مدة التجربة ثابتة: 3 ثوانٍ.\n\n"
-
-                "بعد التجربة يمكنك اختيار "
-                "المدة والدقة للفيديوهات المدفوعة.",
-
-                reply_markup=InlineKeyboardMarkup([
-
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ الرئيسية",
-                            callback_data="back_main"
-                        )
-                    ]
-
-                ])
-            )
-
-            return
+            state["duration"] = DEFAULT_DURATION
 
         await query.edit_message_text(
 
             "⚙️ إعدادات الفيديو:\n\n"
+
+            "🤖 المحرك: Wan 2.2 14B\n"
+            "⚡ Lightning LoRA\n\n"
 
             "اختر الإعداد الذي تريد تغييره.",
 
@@ -3776,7 +2973,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # المدة
+    # المدد
     # =====================================================
 
     if data == "durations":
@@ -3815,11 +3012,7 @@ async def button_handler(
 
             return
 
-        if duration not in [
-            5,
-            10,
-            15
-        ]:
+        if duration not in ALLOWED_DURATIONS:
 
             await query.answer(
                 "هذه المدة غير متاحة.",
@@ -3828,27 +3021,26 @@ async def button_handler(
 
             return
 
-        state = user_states.setdefault(
-            user_id,
-            {}
-        )
+        # التجربة المجانية دائماً 3 ثواني
+        if not has_free_trial(user_id):
 
-        if state.get(
-            "free_trial",
-            False
-        ):
-
-            await query.answer(
-                "التجربة المجانية مدتها 3 ثوانٍ فقط.",
-                show_alert=True
+            state = user_states.setdefault(
+                user_id,
+                {}
             )
 
-            return
+            state["duration"] = duration
 
-        state["duration"] = duration
+        else:
 
-        if "resolution" not in state:
-            state["resolution"] = "480p"
+            # يمكن للمستخدم اختيارها للإعدادات،
+            # لكن التجربة نفسها ستبقى 3 ثواني.
+            state = user_states.setdefault(
+                user_id,
+                {}
+            )
+
+            state["duration"] = duration
 
         await query.answer(
             "تم تغيير المدة."
@@ -3856,8 +3048,7 @@ async def button_handler(
 
         await query.edit_message_text(
 
-            f"✅ تم اختيار "
-            f"{duration} ثانية.",
+            f"✅ تم اختيار {duration} ثانية.",
 
             reply_markup=settings_menu(
                 state
@@ -3867,88 +3058,38 @@ async def button_handler(
         return
 
     # =====================================================
-    # الدقة
+    # معلومات Wan
     # =====================================================
 
-    if data == "resolutions":
+    if data == "wan_info":
 
         await query.answer()
 
         await query.edit_message_text(
 
-            "📺 اختر الدقة:",
+            "🤖 محرك الفيديو\n\n"
 
-            reply_markup=resolution_menu()
-        )
+            "Wan 2.2 14B\n"
+            "⚡ Lightning LoRA\n"
+            "🚀 توليد سريع باستخدام FP8\n\n"
 
-        return
+            "📷 صورة + وصف الحركة\n"
+            "⬇️\n"
+            "🎬 فيديو AI\n\n"
 
-    if data.startswith(
-        "resolution_"
-    ):
+            "المدد المدعومة في البوت:\n"
+            "3 / 4 / 5 ثوانٍ",
 
-        value = data.replace(
-            "resolution_",
-            "",
-            1
-        )
+            reply_markup=InlineKeyboardMarkup([
 
-        allowed = {
+                [
+                    InlineKeyboardButton(
+                        "⬅️ الإعدادات",
+                        callback_data="settings"
+                    )
+                ]
 
-            "480": "480p",
-
-            "720": "720p",
-
-            "1080": "1080p",
-        }
-
-        resolution = allowed.get(
-            value
-        )
-
-        if not resolution:
-
-            await query.answer(
-                "الدقة غير صحيحة.",
-                show_alert=True
-            )
-
-            return
-
-        state = user_states.setdefault(
-            user_id,
-            {}
-        )
-
-        if state.get(
-            "free_trial",
-            False
-        ):
-
-            await query.answer(
-                "يمكن تغيير الدقة بعد بدء الفيديو المدفوع.",
-                show_alert=True
-            )
-
-            return
-
-        state["resolution"] = resolution
-
-        if "duration" not in state:
-            state["duration"] = 5
-
-        await query.answer(
-            "تم تغيير الدقة."
-        )
-
-        await query.edit_message_text(
-
-            f"✅ تم اختيار الدقة "
-            f"{resolution}.",
-
-            reply_markup=settings_menu(
-                state
-            )
+            ])
         )
 
         return
@@ -3965,19 +3106,16 @@ async def button_handler(
 
             "ℹ️ طريقة الاستخدام:\n\n"
 
-            "🎁 أولاً:\n"
-            "لديك تجربة مجانية واحدة لمدة 3 ثوانٍ.\n\n"
+            "1️⃣ لديك تجربة مجانية 3 ثوانٍ.\n"
+            "2️⃣ اضغط «🎬 إنشاء فيديو».\n"
+            "3️⃣ أرسل صورة.\n"
+            "4️⃣ اكتب وصف الحركة.\n"
+            "5️⃣ اضغط «🎬 إنشاء الفيديو».\n\n"
 
-            "🎬 بعد ذلك:\n"
-            "اشترِ رصيدًا لإنشاء المزيد من الفيديوهات.\n\n"
+            "⚙️ المدد المدعومة: 3 / 4 / 5 ثوانٍ.\n\n"
 
-            "1️⃣ اضغط إنشاء فيديو.\n"
-            "2️⃣ أرسل صورة.\n"
-            "3️⃣ اكتب وصف الحركة.\n"
-            "4️⃣ اضغط إنشاء الفيديو.\n\n"
-
-            "⚙️ يمكنك تغيير المدة والدقة "
-            "للفيديوهات المدفوعة.",
+            "🎁 أول فيديو مجاني.\n"
+            "💳 بعد ذلك تحتاج إلى رصيد.",
 
             reply_markup=main_menu(
                 user_id
@@ -3994,10 +3132,32 @@ async def button_handler(
 
         await query.answer()
 
-        user_states.pop(
+        state = user_states.pop(
             user_id,
             None
         )
+
+        image_path = None
+
+        if state:
+            image_path = state.get(
+                "image_path"
+            )
+
+        if image_path:
+
+            try:
+
+                if os.path.exists(
+                    image_path
+                ):
+
+                    os.remove(
+                        image_path
+                    )
+
+            except Exception:
+                pass
 
         await query.edit_message_text(
 
@@ -4062,25 +3222,8 @@ async def error_handler(
 ):
 
     print(
-        "\n" + "=" * 70,
-        flush=True
-    )
-
-    print(
         "BOT ERROR:",
-        repr(context.error),
-        flush=True
-    )
-
-    traceback.print_exception(
-        type(context.error),
-        context.error,
-        context.error.__traceback__
-    )
-
-    print(
-        "=" * 70,
-        flush=True
+        repr(context.error)
     )
 
 
@@ -4091,7 +3234,6 @@ async def error_handler(
 def run_bot():
 
     bot_app = (
-
         Application
         .builder()
         .token(BOT_TOKEN)
@@ -4103,7 +3245,6 @@ def run_bot():
     # =====================================================
 
     bot_app.add_handler(
-
         CommandHandler(
             "start",
             start
@@ -4111,7 +3252,6 @@ def run_bot():
     )
 
     bot_app.add_handler(
-
         CommandHandler(
             "cancel",
             cancel
@@ -4119,7 +3259,6 @@ def run_bot():
     )
 
     bot_app.add_handler(
-
         CommandHandler(
             "help",
             help_command
@@ -4127,11 +3266,10 @@ def run_bot():
     )
 
     # =====================================================
-    # أوامر الإدارة
+    # الإدارة
     # =====================================================
 
     bot_app.add_handler(
-
         CommandHandler(
             "add",
             admin_add
@@ -4139,7 +3277,6 @@ def run_bot():
     )
 
     bot_app.add_handler(
-
         CommandHandler(
             "remove",
             admin_remove
@@ -4147,7 +3284,6 @@ def run_bot():
     )
 
     bot_app.add_handler(
-
         CommandHandler(
             "balance",
             admin_balance
@@ -4155,7 +3291,6 @@ def run_bot():
     )
 
     bot_app.add_handler(
-
         CommandHandler(
             "stats",
             admin_stats
@@ -4167,7 +3302,6 @@ def run_bot():
     # =====================================================
 
     bot_app.add_handler(
-
         MessageHandler(
             filters.PHOTO,
             handle_photo
@@ -4179,7 +3313,6 @@ def run_bot():
     # =====================================================
 
     bot_app.add_handler(
-
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_text
@@ -4191,7 +3324,6 @@ def run_bot():
     # =====================================================
 
     bot_app.add_handler(
-
         CallbackQueryHandler(
             button_handler
         )
@@ -4206,8 +3338,7 @@ def run_bot():
     )
 
     print(
-        "Telegram bot is starting...",
-        flush=True
+        "Telegram bot is starting..."
     )
 
     bot_app.run_polling(
@@ -4222,15 +3353,13 @@ def run_bot():
 if __name__ == "__main__":
 
     print(
-        "Initializing database...",
-        flush=True
+        "Initializing database..."
     )
 
     init_db()
 
     print(
-        "Starting Telegram bot thread...",
-        flush=True
+        "Starting Telegram bot thread..."
     )
 
     bot_thread = threading.Thread(
@@ -4241,8 +3370,7 @@ if __name__ == "__main__":
     bot_thread.start()
 
     print(
-        "Starting Flask web server...",
-        flush=True
+        "Starting Flask web server..."
     )
 
     run_web()
