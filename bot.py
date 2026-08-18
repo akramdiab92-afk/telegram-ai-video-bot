@@ -35,7 +35,7 @@ MAGIC_HOUR_BASE = "https://api.magichour.ai/v1"
 # Telegram ID الخاص بك
 ADMIN_ID = 625548190
 
-# حساب شام كاش الخاص بك
+# حساب شام كاش
 SHAM_CASH_NUMBER = "55c04a684471d4b5f504f0e6e2ca7384"
 
 DB_FILE = "bot_data.db"
@@ -48,8 +48,19 @@ user_states = {}
 # قفل إنشاء الفيديو لكل مستخدم
 generation_locks = {}
 
-# قفل عام لعمليات الدفع الحساسة
+# قفل عمليات الدفع الحساسة
 payment_lock = threading.Lock()
+
+# قفل عام لإنشاء/تعديل المستخدمين
+database_lock = threading.Lock()
+
+
+# =========================================================
+# إعدادات التجربة المجانية
+# =========================================================
+
+FREE_TRIAL_DURATION = 3
+FREE_TRIAL_RESOLUTION = "480p"
 
 
 # =========================================================
@@ -100,36 +111,72 @@ def db():
 
 def init_db():
 
-    connection = db()
+    with database_lock:
 
-    cursor = connection.cursor()
+        connection = db()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            balance INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+        cursor = connection.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            package_id TEXT,
-            package_name TEXT,
-            videos INTEGER,
-            price INTEGER,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+        # المستخدمون
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                balance INTEGER DEFAULT 0,
+                trial_used INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-    connection.commit()
+        # إضافة العمود إذا كانت قاعدة البيانات القديمة لا تحتوي عليه
+        cursor.execute("""
+            PRAGMA table_info(users)
+        """)
 
-    connection.close()
+        columns = [
+            row["name"]
+            for row in cursor.fetchall()
+        ]
+
+        if "trial_used" not in columns:
+
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN trial_used INTEGER DEFAULT 0
+            """)
+
+        # المدفوعات
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                package_id TEXT,
+                package_name TEXT,
+                videos INTEGER,
+                price INTEGER,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # سجل عمليات إنشاء الفيديو
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS generations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                video_type TEXT,
+                duration INTEGER,
+                resolution TEXT,
+                prompt TEXT,
+                status TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        connection.commit()
+
+        connection.close()
 
 
 def ensure_user(user):
@@ -137,40 +184,43 @@ def ensure_user(user):
     if not user:
         return
 
-    connection = db()
+    with database_lock:
 
-    cursor = connection.cursor()
+        connection = db()
 
-    cursor.execute("""
-        INSERT OR IGNORE INTO users
-        (
-            user_id,
-            username,
-            first_name,
-            balance
-        )
-        VALUES (?, ?, ?, 0)
-    """, (
-        user.id,
-        user.username or "",
-        user.first_name or "",
-    ))
+        cursor = connection.cursor()
 
-    cursor.execute("""
-        UPDATE users
-        SET
-            username = ?,
-            first_name = ?
-        WHERE user_id = ?
-    """, (
-        user.username or "",
-        user.first_name or "",
-        user.id,
-    ))
+        cursor.execute("""
+            INSERT OR IGNORE INTO users
+            (
+                user_id,
+                username,
+                first_name,
+                balance,
+                trial_used
+            )
+            VALUES (?, ?, ?, 0, 0)
+        """, (
+            user.id,
+            user.username or "",
+            user.first_name or "",
+        ))
 
-    connection.commit()
+        cursor.execute("""
+            UPDATE users
+            SET
+                username = ?,
+                first_name = ?
+            WHERE user_id = ?
+        """, (
+            user.username or "",
+            user.first_name or "",
+            user.id,
+        ))
 
-    connection.close()
+        connection.commit()
+
+        connection.close()
 
 
 def user_exists(user_id):
@@ -179,15 +229,14 @@ def user_exists(user_id):
 
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT 1
         FROM users
         WHERE user_id = ?
         LIMIT 1
-        """,
-        (user_id,)
-    )
+    """, (
+        user_id,
+    ))
 
     row = cursor.fetchone()
 
@@ -202,14 +251,13 @@ def get_balance(user_id):
 
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT balance
         FROM users
         WHERE user_id = ?
-        """,
-        (user_id,)
-    )
+    """, (
+        user_id,
+    ))
 
     row = cursor.fetchone()
 
@@ -222,6 +270,9 @@ def get_balance(user_id):
 
 
 def add_balance(user_id, amount):
+
+    if amount <= 0:
+        return False
 
     connection = db()
 
@@ -247,6 +298,9 @@ def add_balance(user_id, amount):
 
 def remove_balance(user_id, amount):
 
+    if amount <= 0:
+        return False
+
     connection = db()
 
     cursor = connection.cursor()
@@ -271,12 +325,122 @@ def remove_balance(user_id, amount):
     return success
 
 
+def has_free_trial(user_id):
+
+    connection = db()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT trial_used
+        FROM users
+        WHERE user_id = ?
+    """, (
+        user_id,
+    ))
+
+    row = cursor.fetchone()
+
+    connection.close()
+
+    if not row:
+        return False
+
+    return int(row["trial_used"] or 0) == 0
+
+
+def mark_trial_used(user_id):
+
+    connection = db()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE users
+        SET trial_used = 1
+        WHERE user_id = ?
+        AND trial_used = 0
+    """, (
+        user_id,
+    ))
+
+    changed = cursor.rowcount > 0
+
+    connection.commit()
+
+    connection.close()
+
+    return changed
+
+
+def reset_trial(user_id):
+
+    connection = db()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE users
+        SET trial_used = 0
+        WHERE user_id = ?
+    """, (
+        user_id,
+    ))
+
+    changed = cursor.rowcount > 0
+
+    connection.commit()
+
+    connection.close()
+
+    return changed
+
+
 def get_generation_lock(user_id):
 
     if user_id not in generation_locks:
+
         generation_locks[user_id] = threading.Lock()
 
     return generation_locks[user_id]
+
+
+def save_generation(
+    user_id,
+    video_type,
+    duration,
+    resolution,
+    prompt,
+    status
+):
+
+    connection = db()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        INSERT INTO generations
+        (
+            user_id,
+            video_type,
+            duration,
+            resolution,
+            prompt,
+            status
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        user_id,
+        video_type,
+        duration,
+        resolution,
+        prompt,
+        status,
+    ))
+
+    connection.commit()
+
+    connection.close()
 
 
 # =========================================================
@@ -349,7 +513,10 @@ def create_upload_url(extension="jpg"):
 
     data = response.json()
 
-    items = data.get("items", [])
+    items = data.get(
+        "items",
+        []
+    )
 
     if not items:
 
@@ -357,8 +524,13 @@ def create_upload_url(extension="jpg"):
             f"Magic Hour لم يعطِ رابط رفع الصورة: {data}"
         )
 
-    upload_url = items[0].get("upload_url")
-    file_path = items[0].get("file_path")
+    upload_url = items[0].get(
+        "upload_url"
+    )
+
+    file_path = items[0].get(
+        "file_path"
+    )
 
     if not upload_url or not file_path:
 
@@ -394,6 +566,7 @@ def create_video(
 ):
 
     payload = {
+
         "assets": {
             "image_file_path":
                 file_path
@@ -428,7 +601,9 @@ def create_video(
 
     data = response.json()
 
-    video_id = data.get("id")
+    video_id = data.get(
+        "id"
+    )
 
     if not video_id:
 
@@ -441,7 +616,8 @@ def create_video(
 
 def wait_for_video(video_id):
 
-    # 90 محاولة × 10 ثوانٍ = 15 دقيقة تقريباً
+    # 90 × 10 ثواني = حوالي 15 دقيقة
+
     for attempt in range(90):
 
         response = requests.get(
@@ -459,7 +635,9 @@ def wait_for_video(video_id):
 
         data = response.json()
 
-        status = data.get("status")
+        status = data.get(
+            "status"
+        )
 
         print(
             f"VIDEO STATUS [{attempt + 1}/90]:",
@@ -475,7 +653,9 @@ def wait_for_video(video_id):
 
             if downloads:
 
-                video_url = downloads[0].get("url")
+                video_url = downloads[0].get(
+                    "url"
+                )
 
                 if video_url:
 
@@ -519,16 +699,40 @@ def wait_for_video(video_id):
 
 def main_menu(user_id):
 
-    balance = get_balance(user_id)
+    balance = get_balance(
+        user_id
+    )
 
-    keyboard = [
+    trial_available = has_free_trial(
+        user_id
+    )
 
-        [
-            InlineKeyboardButton(
-                "🎬 إنشاء فيديو",
-                callback_data="new_video"
-            )
-        ],
+    keyboard = []
+
+    # التجربة المجانية
+    if trial_available:
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "🎁 تجربة مجانية — 3 ثواني",
+                    callback_data="free_trial"
+                )
+            ]
+        )
+
+    else:
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "🎬 إنشاء فيديو",
+                    callback_data="new_video"
+                )
+            ]
+        )
+
+    keyboard.extend([
 
         [
             InlineKeyboardButton(
@@ -555,7 +759,8 @@ def main_menu(user_id):
                 callback_data="help"
             )
         ],
-    ]
+
+    ])
 
     if user_id == ADMIN_ID:
 
@@ -612,7 +817,7 @@ def packages_menu():
 
 
 # =========================================================
-# الإعدادات
+# إعدادات الفيديو
 # =========================================================
 
 def settings_menu(state):
@@ -743,7 +948,9 @@ async def start(
 
     user = update.effective_user
 
-    ensure_user(user)
+    ensure_user(
+        user
+    )
 
     user_states.pop(
         user.id,
@@ -754,6 +961,22 @@ async def start(
         user.id
     )
 
+    if has_free_trial(user.id):
+
+        trial_text = (
+            "🎁 لديك تجربة مجانية!\n"
+            "يمكنك إنشاء أول فيديو لك "
+            "مجانًا لمدة 3 ثوانٍ.\n\n"
+        )
+
+    else:
+
+        trial_text = (
+            "🎬 التجربة المجانية مستخدمة.\n"
+            "يمكنك متابعة إنشاء الفيديوهات "
+            "باستخدام رصيدك.\n\n"
+        )
+
     await update.message.reply_text(
 
         "مرحباً 👋\n\n"
@@ -761,10 +984,12 @@ async def start(
         "🎬 أهلاً بك في بوت تحويل الصور "
         "إلى فيديو بالذكاء الاصطناعي.\n\n"
 
+        f"{trial_text}"
+
         f"💰 رصيدك الحالي: "
         f"{balance} فيديو\n\n"
 
-        "📷 اضغط «إنشاء فيديو» للبدء.",
+        "📷 اختر من القائمة للبدء.",
 
         reply_markup=main_menu(
             user.id
@@ -813,14 +1038,18 @@ async def help_command(
 
         "ℹ️ طريقة الاستخدام:\n\n"
 
-        "1️⃣ اشحن رصيدك.\n"
-        "2️⃣ اضغط إنشاء فيديو.\n"
-        "3️⃣ أرسل صورة.\n"
-        "4️⃣ اكتب وصف الحركة.\n"
-        "5️⃣ اضغط إنشاء الفيديو.\n\n"
+        "🎁 أول مرة:\n"
+        "تحصل على فيديو مجاني لمدة 3 ثوانٍ.\n\n"
 
-        "مثال:\n"
+        "🎬 بعد التجربة:\n"
+        "اشترِ رصيدًا ثم أرسل صورة واكتب "
+        "وصف الحركة.\n\n"
 
+        "⚙️ يمكنك اختيار:\n"
+        "• مدة 5 أو 10 أو 15 ثانية\n"
+        "• دقة 480p أو 720p أو 1080p\n\n"
+
+        "📝 مثال للوصف:\n"
         "اجعل الشخص يبتسم ويحرك رأسه "
         "بشكل طبيعي مع حركة كاميرا "
         "سينمائية خفيفة، مع الحفاظ "
@@ -848,6 +1077,9 @@ async def show_buy(
     await query.edit_message_text(
 
         "💰 اختر الباقة التي تريد شراءها:\n\n"
+
+        "🎬 كل فيديو يتم خصم فيديو واحد "
+        "من رصيدك بعد نجاح الإنشاء.\n\n"
 
         "بعد اختيار الباقة ستظهر لك "
         "طريقة الدفع عبر شام كاش.",
@@ -1442,34 +1674,62 @@ async def admin_panel(
 
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM users
-        """
-    )
+    """)
 
     users = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM payments
         WHERE status = 'pending'
-        """
-    )
+    """)
 
     pending = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM payments
         WHERE status = 'approved'
-        """
-    )
+    """)
 
     approved = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM payments
+        WHERE status = 'rejected'
+    """)
+
+    rejected = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COALESCE(
+            SUM(balance),
+            0
+        ) AS total
+        FROM users
+    """)
+
+    total_balance = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM users
+        WHERE trial_used = 1
+    """)
+
+    trials_used = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM generations
+        WHERE status = 'success'
+    """)
+
+    successful_videos = cursor.fetchone()["total"]
 
     connection.close()
 
@@ -1479,14 +1739,21 @@ async def admin_panel(
 
         "👑 لوحة الإدارة\n\n"
 
-        f"👥 المستخدمون: "
-        f"{users}\n"
+        f"👥 المستخدمون: {users}\n"
 
-        f"⏳ طلبات الدفع المعلقة: "
-        f"{pending}\n"
+        f"🎁 استخدموا التجربة: {trials_used}\n"
 
-        f"✅ المدفوعات المؤكدة: "
-        f"{approved}\n\n"
+        f"🎬 الفيديوهات الناجحة: "
+        f"{successful_videos}\n\n"
+
+        f"⏳ طلبات الدفع المعلقة: {pending}\n"
+
+        f"✅ المدفوعات المؤكدة: {approved}\n"
+
+        f"❌ المدفوعات المرفوضة: {rejected}\n\n"
+
+        f"💰 الأرصدة الحالية: "
+        f"{total_balance} فيديو\n\n"
 
         "الأوامر:\n\n"
 
@@ -1498,6 +1765,9 @@ async def admin_panel(
 
         "/balance USER_ID\n"
         "عرض رصيد\n\n"
+
+        "/reset_trial USER_ID\n"
+        "إعادة التجربة المجانية\n\n"
 
         "/stats\n"
         "الإحصائيات",
@@ -1584,14 +1854,11 @@ async def admin_add(
 
             "✅ تمت إضافة الرصيد.\n\n"
 
-            f"👤 المستخدم: "
-            f"{user_id}\n"
+            f"👤 المستخدم: {user_id}\n"
 
-            f"➕ المضاف: "
-            f"{amount}\n"
+            f"➕ المضاف: {amount}\n"
 
-            f"💰 الرصيد الجديد: "
-            f"{balance}"
+            f"💰 الرصيد الجديد: {balance}"
         )
 
         try:
@@ -1609,6 +1876,10 @@ async def admin_add(
 
                     f"💰 رصيدك الحالي: "
                     f"{balance} فيديو"
+                ),
+
+                reply_markup=main_menu(
+                    user_id
                 )
             )
 
@@ -1706,14 +1977,11 @@ async def admin_remove(
 
             "✅ تم سحب الرصيد.\n\n"
 
-            f"👤 المستخدم: "
-            f"{user_id}\n"
+            f"👤 المستخدم: {user_id}\n"
 
-            f"➖ المسحوب: "
-            f"{amount}\n"
+            f"➖ المسحوب: {amount}\n"
 
-            f"💰 الرصيد الجديد: "
-            f"{balance}"
+            f"💰 الرصيد الجديد: {balance}"
         )
 
     except ValueError:
@@ -1774,13 +2042,19 @@ async def admin_balance(
             user_id
         )
 
+        trial = (
+            "متاحة"
+            if has_free_trial(user_id)
+            else "مستخدمة"
+        )
+
         await update.message.reply_text(
 
-            f"👤 المستخدم: "
-            f"{user_id}\n"
+            f"👤 المستخدم: {user_id}\n\n"
 
-            f"💰 الرصيد: "
-            f"{balance} فيديو"
+            f"💰 الرصيد: {balance} فيديو\n"
+
+            f"🎁 التجربة المجانية: {trial}"
         )
 
     except ValueError:
@@ -1793,6 +2067,107 @@ async def admin_balance(
 
         print(
             "ADMIN BALANCE ERROR:",
+            repr(error)
+        )
+
+        await update.message.reply_text(
+            "❌ حدث خطأ."
+        )
+
+
+# =========================================================
+# إعادة التجربة المجانية للمستخدم
+# =========================================================
+
+async def admin_reset_trial(
+    update,
+    context
+):
+
+    if update.effective_user.id != ADMIN_ID:
+
+        return
+
+    if len(context.args) != 1:
+
+        await update.message.reply_text(
+            "الاستخدام:\n"
+            "/reset_trial USER_ID"
+        )
+
+        return
+
+    try:
+
+        user_id = int(
+            context.args[0]
+        )
+
+        if not user_exists(user_id):
+
+            await update.message.reply_text(
+                "❌ المستخدم غير موجود."
+            )
+
+            return
+
+        success = reset_trial(
+            user_id
+        )
+
+        if not success:
+
+            await update.message.reply_text(
+                "⚠️ لم يتم تغيير الحالة."
+            )
+
+            return
+
+        await update.message.reply_text(
+
+            "✅ تمت إعادة التجربة المجانية.\n\n"
+
+            f"👤 المستخدم: {user_id}\n"
+
+            "🎁 أصبح بإمكانه استخدام "
+            "التجربة المجانية مرة أخرى."
+        )
+
+        try:
+
+            await context.bot.send_message(
+
+                chat_id=user_id,
+
+                text=(
+                    "🎁 تمت إعادة تفعيل التجربة المجانية "
+                    "لحسابك من الإدارة.\n\n"
+                    "يمكنك الآن إنشاء فيديو مجاني "
+                    "لمدة 3 ثوانٍ."
+                ),
+
+                reply_markup=main_menu(
+                    user_id
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "RESET TRIAL NOTIFICATION ERROR:",
+                repr(error)
+            )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ معرف المستخدم غير صحيح."
+        )
+
+    except Exception as error:
+
+        print(
+            "RESET TRIAL ERROR:",
             repr(error)
         )
 
@@ -1818,52 +2193,76 @@ async def admin_stats(
 
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COUNT(*) AS total
         FROM users
-        """
-    )
+    """)
 
     users = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COALESCE(
             SUM(balance),
             0
         ) AS total
         FROM users
-        """
-    )
+    """)
 
     total_balance = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM users
+        WHERE trial_used = 1
+    """)
+
+    trials_used = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM generations
+        WHERE status = 'success'
+    """)
+
+    successful = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM generations
+        WHERE status = 'failed'
+    """)
+
+    failed = cursor.fetchone()["total"]
+
+    cursor.execute("""
         SELECT COALESCE(
             SUM(videos),
             0
         ) AS total
         FROM payments
         WHERE status = 'approved'
-        """
-    )
+    """)
 
     sold = cursor.fetchone()["total"]
 
-    cursor.execute(
-        """
+    cursor.execute("""
         SELECT COALESCE(
             SUM(price),
             0
         ) AS total
         FROM payments
         WHERE status = 'approved'
-        """
-    )
+    """)
 
     revenue = cursor.fetchone()["total"]
+
+    cursor.execute("""
+        SELECT COUNT(*) AS total
+        FROM payments
+        WHERE status = 'pending'
+    """)
+
+    pending = cursor.fetchone()["total"]
 
     connection.close()
 
@@ -1871,8 +2270,16 @@ async def admin_stats(
 
         "📊 إحصائيات البوت\n\n"
 
-        f"👥 المستخدمون: "
-        f"{users}\n\n"
+        f"👥 المستخدمون: {users}\n\n"
+
+        f"🎁 التجارب المستخدمة: "
+        f"{trials_used}\n\n"
+
+        f"🎬 الفيديوهات الناجحة: "
+        f"{successful}\n\n"
+
+        f"❌ الفيديوهات الفاشلة: "
+        f"{failed}\n\n"
 
         f"💰 الأرصدة الحالية: "
         f"{total_balance}\n\n"
@@ -1881,7 +2288,174 @@ async def admin_stats(
         f"{sold}\n\n"
 
         f"💵 إجمالي المبيعات: "
-        f"{revenue:,} ل.س"
+        f"{revenue:,} ل.س\n\n"
+
+        f"⏳ المدفوعات المعلقة: "
+        f"{pending}"
+    )
+
+
+# =========================================================
+# بدء الفيديو المجاني
+# =========================================================
+
+async def start_free_trial(
+    update,
+    context
+):
+
+    query = update.callback_query
+
+    user_id = query.from_user.id
+
+    await query.answer()
+
+    ensure_user(
+        query.from_user
+    )
+
+    if not has_free_trial(user_id):
+
+        await query.edit_message_text(
+
+            "⚠️ لقد استخدمت التجربة المجانية مسبقًا.\n\n"
+
+            "يمكنك الآن شراء رصيد وإنشاء "
+            "فيديوهات إضافية.",
+
+            reply_markup=main_menu(
+                user_id
+            )
+        )
+
+        return
+
+    # التجربة إجبارياً 3 ثواني و480p
+    user_states[user_id] = {
+
+        "waiting_for_photo":
+            True,
+
+        "trial":
+            True,
+
+        "duration":
+            FREE_TRIAL_DURATION,
+
+        "resolution":
+            FREE_TRIAL_RESOLUTION,
+    }
+
+    await query.edit_message_text(
+
+        "🎁 التجربة المجانية\n\n"
+
+        "هذه أول محاولة لك وهي مجانية بالكامل. ❤️\n\n"
+
+        "⏱️ المدة: 3 ثواني فقط\n"
+
+        "📺 الدقة: 480p\n"
+
+        "💰 السعر: مجانًا\n\n"
+
+        "📷 أرسل الصورة الآن.\n\n"
+
+        "⚠️ بعد استخدام التجربة، "
+        "ستحتاج إلى شراء رصيد لإنشاء فيديوهات أخرى."
+    )
+
+
+# =========================================================
+# بدء فيديو مدفوع
+# =========================================================
+
+async def start_paid_video(
+    update,
+    context
+):
+
+    query = update.callback_query
+
+    user_id = query.from_user.id
+
+    await query.answer()
+
+    balance = get_balance(
+        user_id
+    )
+
+    if balance <= 0:
+
+        await query.edit_message_text(
+
+            "💳 رصيدك صفر.\n\n"
+
+            "اشترِ رصيدًا أولاً حتى تتمكن "
+            "من إنشاء فيديو.",
+
+            reply_markup=InlineKeyboardMarkup([
+
+                [
+                    InlineKeyboardButton(
+                        "💰 شراء رصيد",
+                        callback_data="buy"
+                    )
+                ],
+
+                [
+                    InlineKeyboardButton(
+                        "⬅️ الرئيسية",
+                        callback_data="back_main"
+                    )
+                ]
+
+            ])
+        )
+
+        return
+
+    old_state = user_states.get(
+        user_id,
+        {}
+    )
+
+    duration = old_state.get(
+        "duration",
+        5
+    )
+
+    resolution = old_state.get(
+        "resolution",
+        "480p"
+    )
+
+    user_states[user_id] = {
+
+        "waiting_for_photo":
+            True,
+
+        "trial":
+            False,
+
+        "duration":
+            duration,
+
+        "resolution":
+            resolution,
+    }
+
+    await query.edit_message_text(
+
+        "🎬 إنشاء فيديو جديد\n\n"
+
+        f"💰 رصيدك: {balance} فيديو\n\n"
+
+        f"⏱️ المدة: {duration} ثواني\n"
+
+        f"📺 الدقة: {resolution}\n\n"
+
+        "📷 أرسل الصورة التي تريد "
+        "تحويلها إلى فيديو."
     )
 
 
@@ -1908,39 +2482,61 @@ async def handle_photo(
 
         return
 
-    balance = get_balance(
-        user_id
-    )
-
-    if balance <= 0:
-
-        await update.message.reply_text(
-
-            "💳 لا يوجد لديك رصيد كافٍ.\n\n"
-
-            "اشترِ رصيدًا أولاً حتى تتمكن "
-            "من إنشاء الفيديو.",
-
-            reply_markup=InlineKeyboardMarkup([
-
-                [
-                    InlineKeyboardButton(
-                        "💰 شراء رصيد",
-                        callback_data="buy"
-                    )
-                ]
-
-            ])
-        )
-
-        return
-
     state = user_states.get(
         user_id,
         {}
     )
 
-    # التأكد أن المستخدم فعلاً في مرحلة إرسال الصورة
+    # تجربة مجانية
+    if state.get("trial"):
+
+        if not has_free_trial(user_id):
+
+            await update.message.reply_text(
+
+                "⚠️ التجربة المجانية مستخدمة مسبقًا.",
+
+                reply_markup=main_menu(
+                    user_id
+                )
+            )
+
+            user_states.pop(
+                user_id,
+                None
+            )
+
+            return
+
+    # فيديو مدفوع
+    else:
+
+        balance = get_balance(
+            user_id
+        )
+
+        if balance <= 0:
+
+            await update.message.reply_text(
+
+                "💳 لا يوجد لديك رصيد كافٍ.\n\n"
+
+                "اشترِ رصيدًا أولاً.",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "💰 شراء رصيد",
+                            callback_data="buy"
+                        )
+                    ]
+
+                ])
+            )
+
+            return
+
     if not state.get(
         "waiting_for_photo"
     ):
@@ -1948,7 +2544,7 @@ async def handle_photo(
         await update.message.reply_text(
 
             "📷 اضغط أولاً على "
-            "«🎬 إنشاء فيديو» ثم أرسل الصورة.",
+            "«إنشاء فيديو» ثم أرسل الصورة.",
 
             reply_markup=main_menu(
                 user_id
@@ -1967,15 +2563,18 @@ async def handle_photo(
             await telegram_file.download_as_bytearray()
         )
 
-        # الحفاظ على الإعدادات الموجودة
         duration = state.get(
             "duration",
-            5
+            FREE_TRIAL_DURATION
+            if state.get("trial")
+            else 5
         )
 
         resolution = state.get(
             "resolution",
-            "480p"
+            FREE_TRIAL_RESOLUTION
+            if state.get("trial")
+            else "480p"
         )
 
         user_states[user_id] = {
@@ -1989,6 +2588,12 @@ async def handle_photo(
             "waiting_for_photo":
                 False,
 
+            "trial":
+                state.get(
+                    "trial",
+                    False
+                ),
+
             "duration":
                 duration,
 
@@ -1996,19 +2601,36 @@ async def handle_photo(
                 resolution,
         }
 
-        await update.message.reply_text(
+        if state.get("trial"):
 
-            "✅ وصلت الصورة!\n\n"
+            await update.message.reply_text(
 
-            "✍️ الآن اكتب وصف الحركة التي تريدها.\n\n"
+                "✅ وصلت الصورة!\n\n"
 
-            "مثال:\n\n"
+                "🎁 أنت تستخدم التجربة المجانية.\n"
 
-            "اجعل الشخص يبتسم ويحرك رأسه "
-            "ببطء مع حركة كاميرا سينمائية "
-            "خفيفة، وحافظ على ملامح الوجه "
-            "كما هي."
-        )
+                "⏱️ 3 ثواني\n"
+
+                "📺 480p\n\n"
+
+                "✍️ الآن اكتب وصف الحركة التي تريدها."
+            )
+
+        else:
+
+            await update.message.reply_text(
+
+                "✅ وصلت الصورة!\n\n"
+
+                "✍️ الآن اكتب وصف الحركة التي تريدها.\n\n"
+
+                "مثال:\n\n"
+
+                "اجعل الشخص يبتسم ويحرك رأسه "
+                "ببطء مع حركة كاميرا سينمائية "
+                "خفيفة، وحافظ على ملامح الوجه "
+                "كما هي."
+            )
 
     except Exception as error:
 
@@ -2089,6 +2711,24 @@ async def handle_text(
 
         return
 
+    # إذا كانت تجربة مجانية
+    if state.get("trial"):
+
+        duration = FREE_TRIAL_DURATION
+        resolution = FREE_TRIAL_RESOLUTION
+
+    else:
+
+        duration = state.get(
+            "duration",
+            5
+        )
+
+        resolution = state.get(
+            "resolution",
+            "480p"
+        )
+
     state["prompt"] = prompt
 
     state["waiting_for_prompt"] = False
@@ -2118,27 +2758,50 @@ async def handle_text(
 
     ]
 
-    await update.message.reply_text(
+    if state.get("trial"):
 
-        "📝 تم استلام وصف الحركة:\n\n"
+        await update.message.reply_text(
 
-        f"{prompt}\n\n"
+            "🎁 تجربة مجانية\n\n"
 
-        f"⏱️ المدة: "
-        f"{state.get('duration', 5)} ثواني\n"
+            "📝 وصف الحركة:\n\n"
 
-        f"📺 الدقة: "
-        f"{state.get('resolution', '480p')}\n\n"
+            f"{prompt}\n\n"
 
-        f"💰 رصيدك الحالي: "
-        f"{get_balance(user_id)} فيديو\n\n"
+            "⏱️ المدة: 3 ثواني\n"
 
-        "اضغط «إنشاء الفيديو» للبدء.",
+            "📺 الدقة: 480p\n"
 
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
+            "💰 السعر: مجانًا\n\n"
+
+            "اضغط «🎬 إنشاء الفيديو» للبدء.",
+
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
         )
-    )
+
+    else:
+
+        await update.message.reply_text(
+
+            "📝 تم استلام وصف الحركة:\n\n"
+
+            f"{prompt}\n\n"
+
+            f"⏱️ المدة: {duration} ثواني\n"
+
+            f"📺 الدقة: {resolution}\n\n"
+
+            f"💰 رصيدك الحالي: "
+            f"{get_balance(user_id)} فيديو\n\n"
+
+            "اضغط «🎬 إنشاء الفيديو» للبدء.",
+
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
 
 
 # =========================================================
@@ -2152,15 +2815,15 @@ async def generate_video(
 
     query = update.callback_query
 
-    await query.answer()
-
     user_id = query.from_user.id
+
+    await query.answer()
 
     lock = get_generation_lock(
         user_id
     )
 
-    # منع الضغط على إنشاء الفيديو مرتين
+    # منع الضغط مرتين
     if not lock.acquire(
         blocking=False
     ):
@@ -2172,38 +2835,14 @@ async def generate_video(
 
         return
 
+    trial_reserved = False
+
     try:
 
         state = user_states.get(
             user_id,
             {}
         )
-
-        balance = get_balance(
-            user_id
-        )
-
-        if balance <= 0:
-
-            await query.edit_message_text(
-
-                "💳 لا يوجد رصيد كافٍ.\n\n"
-
-                "اشترِ رصيدًا أولاً.",
-
-                reply_markup=InlineKeyboardMarkup([
-
-                    [
-                        InlineKeyboardButton(
-                            "💰 شراء رصيد",
-                            callback_data="buy"
-                        )
-                    ]
-
-                ])
-            )
-
-            return
 
         if (
             "image" not in state
@@ -2222,32 +2861,176 @@ async def generate_video(
 
             return
 
-        duration = state.get(
-            "duration",
-            5
+        is_trial = bool(
+            state.get(
+                "trial",
+                False
+            )
         )
 
-        resolution = state.get(
-            "resolution",
-            "480p"
-        )
+        # =====================================================
+        # التحقق من التجربة المجانية
+        # =====================================================
+
+        if is_trial:
+
+            if not has_free_trial(user_id):
+
+                await query.edit_message_text(
+
+                    "⚠️ التجربة المجانية مستخدمة مسبقًا.\n\n"
+
+                    "اشترِ رصيدًا للمتابعة.",
+
+                    reply_markup=InlineKeyboardMarkup([
+
+                        [
+                            InlineKeyboardButton(
+                                "💰 شراء رصيد",
+                                callback_data="buy"
+                            )
+                        ]
+
+                    ])
+                )
+
+                user_states.pop(
+                    user_id,
+                    None
+                )
+
+                return
+
+            # تسجيل التجربة قبل البدء لمنع التكرار
+            trial_reserved = mark_trial_used(
+                user_id
+            )
+
+            if not trial_reserved:
+
+                await query.edit_message_text(
+
+                    "⚠️ لا يمكن استخدام التجربة المجانية مرة أخرى.",
+
+                    reply_markup=main_menu(
+                        user_id
+                    )
+                )
+
+                user_states.pop(
+                    user_id,
+                    None
+                )
+
+                return
+
+            duration = FREE_TRIAL_DURATION
+            resolution = FREE_TRIAL_RESOLUTION
+
+        else:
+
+            # =================================================
+            # الفيديو المدفوع
+            # =================================================
+
+            balance = get_balance(
+                user_id
+            )
+
+            if balance <= 0:
+
+                await query.edit_message_text(
+
+                    "💳 لا يوجد رصيد كافٍ.\n\n"
+
+                    "اشترِ رصيدًا أولاً.",
+
+                    reply_markup=InlineKeyboardMarkup([
+
+                        [
+                            InlineKeyboardButton(
+                                "💰 شراء رصيد",
+                                callback_data="buy"
+                            )
+                        ]
+
+                    ])
+                )
+
+                return
+
+            duration = state.get(
+                "duration",
+                5
+            )
+
+            resolution = state.get(
+                "resolution",
+                "480p"
+            )
 
         prompt = state["prompt"]
 
         image_bytes = state["image"]
 
-        await query.edit_message_text(
-
-            "⏳ جاري إنشاء الفيديو...\n\n"
-
-            "📤 جاري رفع الصورة...\n"
-
-            f"⏱️ المدة: {duration} ثواني\n"
-
-            f"📺 الدقة: {resolution}\n\n"
-
-            "قد يستغرق الأمر بعض الوقت."
+        video_type = (
+            "free_trial"
+            if is_trial
+            else "paid"
         )
+
+        # =====================================================
+        # حفظ العملية
+        # =====================================================
+
+        save_generation(
+
+            user_id=user_id,
+
+            video_type=video_type,
+
+            duration=duration,
+
+            resolution=resolution,
+
+            prompt=prompt,
+
+            status="started"
+        )
+
+        # =====================================================
+        # رسالة البداية
+        # =====================================================
+
+        if is_trial:
+
+            await query.edit_message_text(
+
+                "🎁 جاري إنشاء تجربتك المجانية...\n\n"
+
+                "📤 جاري رفع الصورة...\n"
+
+                "⏱️ المدة: 3 ثواني\n"
+
+                "📺 الدقة: 480p\n\n"
+
+                "💰 لن يتم خصم أي رصيد."
+            )
+
+        else:
+
+            await query.edit_message_text(
+
+                "⏳ جاري إنشاء الفيديو...\n\n"
+
+                "📤 جاري رفع الصورة...\n"
+
+                f"⏱️ المدة: {duration} ثواني\n"
+
+                f"📺 الدقة: {resolution}\n\n"
+
+                "قد يستغرق الأمر بعض الوقت."
+            )
 
         try:
 
@@ -2326,14 +3109,42 @@ async def generate_video(
                     final_data
                 )
 
+                # في حال التجربة، نعيد السماح بها
+                # لأن الفيديو لم ينجح
+                if is_trial and trial_reserved:
+
+                    reset_trial(
+                        user_id
+                    )
+
+                    trial_reserved = False
+
+                save_generation(
+
+                    user_id=user_id,
+
+                    video_type=video_type,
+
+                    duration=duration,
+
+                    resolution=resolution,
+
+                    prompt=prompt,
+
+                    status="failed"
+                )
+
                 await query.edit_message_text(
 
                     "❌ لم يتم إنشاء الفيديو.\n\n"
 
-                    "لم يتم خصم الرصيد لأن العملية "
-                    "لم تنجح.\n\n"
+                    "لم يتم خصم أي رصيد.\n\n"
 
-                    "يمكنك المحاولة مرة أخرى."
+                    "يمكنك المحاولة مرة أخرى.",
+
+                    reply_markup=main_menu(
+                        user_id
+                    )
                 )
 
                 return
@@ -2370,34 +3181,38 @@ async def generate_video(
             )
 
             # =================================================
-            # خصم رصيد واحد فقط
+            # خصم الرصيد للفيديو المدفوع فقط
             # =================================================
 
-            removed = remove_balance(
-                user_id,
-                1
-            )
+            if not is_trial:
 
-            if not removed:
-
-                # الفيديو تم إنشاؤه لكن الرصيد اختفى
-                # لا نرسل رسالة توحي بأن العملية طبيعية
-                print(
-                    "BALANCE DEDUCTION FAILED:",
-                    user_id
+                removed = remove_balance(
+                    user_id,
+                    1
                 )
 
-                await query.edit_message_text(
+                if not removed:
 
-                    "⚠️ تم إنشاء الفيديو، "
-                    "لكن تعذر خصم الرصيد.\n\n"
+                    print(
+                        "BALANCE DEDUCTION FAILED:",
+                        user_id
+                    )
 
-                    "تم إيقاف العملية لحماية رصيدك.\n\n"
+                    await query.edit_message_text(
 
-                    "تواصل مع الإدارة."
-                )
+                        "⚠️ تم إنشاء الفيديو، "
+                        "لكن تعذر خصم الرصيد.\n\n"
 
-                return
+                        "تم إيقاف العملية لحماية رصيدك.\n\n"
+
+                        "تواصل مع الإدارة."
+                    )
+
+                    return
+
+            # =================================================
+            # الرصيد الحالي
+            # =================================================
 
             new_balance = get_balance(
                 user_id
@@ -2409,13 +3224,26 @@ async def generate_video(
 
             try:
 
-                await context.bot.send_video(
+                if is_trial:
 
-                    chat_id=user_id,
+                    caption = (
 
-                    video=video_bytes,
+                        "🎁 تمت التجربة المجانية بنجاح! 🎬\n\n"
 
-                    caption=(
+                        "⏱️ المدة: 3 ثواني\n"
+
+                        "📺 الدقة: 480p\n"
+
+                        "💰 لم يتم خصم أي رصيد.\n\n"
+
+                        "🔥 أعجبك الفيديو؟\n"
+                        "اشترِ رصيدًا لإنشاء فيديوهات "
+                        "أطول وبجودات أعلى."
+                    )
+
+                else:
+
+                    caption = (
 
                         "🎬 تم إنشاء الفيديو بنجاح!\n\n"
 
@@ -2424,6 +3252,14 @@ async def generate_video(
                         f"💰 رصيدك المتبقي: "
                         f"{new_balance} فيديو"
                     )
+
+                await context.bot.send_video(
+
+                    chat_id=user_id,
+
+                    video=video_bytes,
+
+                    caption=caption
                 )
 
             except Exception as send_error:
@@ -2433,8 +3269,6 @@ async def generate_video(
                     repr(send_error)
                 )
 
-                # لا نعيد الرصيد تلقائياً لأن الخصم تم
-                # ولكن نخبر المستخدم والإدارة
                 try:
 
                     await context.bot.send_message(
@@ -2445,10 +3279,13 @@ async def generate_video(
 
                             "⚠️ تنبيه:\n\n"
 
-                            "تم إنشاء فيديو وخصم رصيد، "
+                            "تم إنشاء فيديو، "
                             "لكن تعذر إرساله للمستخدم.\n\n"
 
                             f"👤 المستخدم: {user_id}\n"
+
+                            f"🎁 تجربة مجانية: "
+                            f"{is_trial}\n"
 
                             f"💰 الرصيد الحالي: "
                             f"{new_balance}"
@@ -2460,13 +3297,32 @@ async def generate_video(
 
                 await query.edit_message_text(
 
-                    "⚠️ تم إنشاء الفيديو وخصم فيديو واحد، "
+                    "⚠️ تم إنشاء الفيديو، "
                     "لكن حدث خطأ أثناء إرساله.\n\n"
 
                     "تم إبلاغ الإدارة."
                 )
 
                 return
+
+            # =================================================
+            # نجاح كامل
+            # =================================================
+
+            save_generation(
+
+                user_id=user_id,
+
+                video_type=video_type,
+
+                duration=duration,
+
+                resolution=resolution,
+
+                prompt=prompt,
+
+                status="success"
+            )
 
             # =================================================
             # تنظيف الحالة
@@ -2477,17 +3333,35 @@ async def generate_video(
                 None
             )
 
-            await query.edit_message_text(
+            if is_trial:
 
-                "✅ تم إنشاء الفيديو وإرساله بنجاح! 🎬\n\n"
+                await query.edit_message_text(
 
-                f"💰 رصيدك المتبقي: "
-                f"{new_balance} فيديو",
+                    "🎉 تمت التجربة المجانية بنجاح!\n\n"
 
-                reply_markup=main_menu(
-                    user_id
+                    "🎁 كانت هذه محاولتك المجانية الوحيدة.\n\n"
+
+                    "🔥 لإنشاء فيديوهات جديدة، "
+                    "اشترِ رصيدًا من القائمة.",
+
+                    reply_markup=main_menu(
+                        user_id
+                    )
                 )
-            )
+
+            else:
+
+                await query.edit_message_text(
+
+                    "✅ تم إنشاء الفيديو وإرساله بنجاح! 🎬\n\n"
+
+                    f"💰 رصيدك المتبقي: "
+                    f"{new_balance} فيديو",
+
+                    reply_markup=main_menu(
+                        user_id
+                    )
+                )
 
         except requests.HTTPError as error:
 
@@ -2513,16 +3387,43 @@ async def generate_video(
             except Exception:
                 pass
 
+            # إعادة التجربة في حال فشل الطلب
+            if is_trial and trial_reserved:
+
+                reset_trial(
+                    user_id
+                )
+
+                trial_reserved = False
+
+            save_generation(
+
+                user_id=user_id,
+
+                video_type=video_type,
+
+                duration=duration,
+
+                resolution=resolution,
+
+                prompt=prompt,
+
+                status="failed"
+            )
+
             await query.edit_message_text(
 
                 "❌ Magic Hour رفض الطلب أو حدث خطأ في الاتصال.\n\n"
 
-                "جرّب الإعدادات الافتراضية:\n"
+                "إذا كنت تستخدم الفيديو المدفوع، "
+                "لم يتم خصم الرصيد.\n\n"
 
-                "📺 480p\n"
-                "⏱️ 5 ثواني\n\n"
+                "إذا كانت هذه تجربتك المجانية، "
+                "تم الحفاظ على التجربة ويمكنك المحاولة مرة أخرى.",
 
-                "💳 لم يتم خصم الرصيد."
+                reply_markup=main_menu(
+                    user_id
+                )
             )
 
         except Exception as error:
@@ -2532,20 +3433,52 @@ async def generate_video(
                 repr(error)
             )
 
+            # إعادة التجربة إذا فشلت العملية
+            if is_trial and trial_reserved:
+
+                reset_trial(
+                    user_id
+                )
+
+                trial_reserved = False
+
+            save_generation(
+
+                user_id=user_id,
+
+                video_type=video_type,
+
+                duration=duration,
+
+                resolution=resolution,
+
+                prompt=prompt,
+
+                status="failed"
+            )
+
             await query.edit_message_text(
 
                 "❌ حدث خطأ أثناء إنشاء الفيديو.\n\n"
 
-                "💳 لم يتم خصم الرصيد.\n\n"
+                "لم يتم خصم أي رصيد.\n\n"
 
-                "يمكنك المحاولة مرة أخرى."
+                "إذا كانت هذه التجربة المجانية، "
+                "يمكنك المحاولة مرة أخرى.",
+
+                reply_markup=main_menu(
+                    user_id
+                )
             )
 
     finally:
 
         try:
+
             lock.release()
+
         except Exception:
+
             pass
 
 
@@ -2567,6 +3500,19 @@ async def button_handler(
     )
 
     data = query.data or ""
+
+    # =====================================================
+    # التجربة المجانية
+    # =====================================================
+
+    if data == "free_trial":
+
+        await start_free_trial(
+            update,
+            context
+        )
+
+        return
 
     # =====================================================
     # شراء
@@ -2687,87 +3633,14 @@ async def button_handler(
         return
 
     # =====================================================
-    # إنشاء فيديو
+    # إنشاء فيديو مدفوع
     # =====================================================
 
     if data == "new_video":
 
-        await query.answer()
-
-        balance = get_balance(
-            user_id
-        )
-
-        if balance <= 0:
-
-            await query.edit_message_text(
-
-                "💳 رصيدك صفر.\n\n"
-
-                "اشترِ رصيدًا أولاً.",
-
-                reply_markup=InlineKeyboardMarkup([
-
-                    [
-                        InlineKeyboardButton(
-                            "💰 شراء رصيد",
-                            callback_data="buy"
-                        )
-                    ],
-
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ الرئيسية",
-                            callback_data="back_main"
-                        )
-                    ]
-
-                ])
-            )
-
-            return
-
-        # الحفاظ على الإعدادات الحالية
-        old_state = user_states.get(
-            user_id,
-            {}
-        )
-
-        duration = old_state.get(
-            "duration",
-            5
-        )
-
-        resolution = old_state.get(
-            "resolution",
-            "480p"
-        )
-
-        user_states[user_id] = {
-
-            "waiting_for_photo":
-                True,
-
-            "duration":
-                duration,
-
-            "resolution":
-                resolution,
-        }
-
-        await query.edit_message_text(
-
-            "📷 أرسل الصورة التي تريد "
-            "تحويلها إلى فيديو.\n\n"
-
-            f"💰 رصيدك: "
-            f"{balance} فيديو\n\n"
-
-            f"⏱️ المدة: "
-            f"{duration} ثواني\n"
-
-            f"📺 الدقة: "
-            f"{resolution}"
+        await start_paid_video(
+            update,
+            context
         )
 
         return
@@ -2784,11 +3657,25 @@ async def button_handler(
             user_id
         )
 
+        if has_free_trial(user_id):
+
+            trial_status = (
+                "🎁 التجربة المجانية: متاحة"
+            )
+
+        else:
+
+            trial_status = (
+                "🎁 التجربة المجانية: مستخدمة"
+            )
+
         await query.edit_message_text(
 
-            "💳 رصيدك الحالي:\n\n"
+            "💳 رصيد حسابك\n\n"
 
-            f"🎬 {balance} فيديو",
+            f"🎬 الرصيد: {balance} فيديو\n\n"
+
+            f"{trial_status}",
 
             reply_markup=main_menu(
                 user_id
@@ -2805,6 +3692,39 @@ async def button_handler(
 
         await query.answer()
 
+        # لا نسمح بتغيير إعدادات التجربة
+        state = user_states.get(
+            user_id,
+            {}
+        )
+
+        if state.get("trial"):
+
+            await query.edit_message_text(
+
+                "🎁 التجربة المجانية ثابتة:\n\n"
+
+                "⏱️ 3 ثواني\n"
+
+                "📺 480p\n\n"
+
+                "هذه الإعدادات لا يمكن تغييرها "
+                "في التجربة المجانية.",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ رجوع",
+                            callback_data="back_main"
+                        )
+                    ]
+
+                ])
+            )
+
+            return
+
         state = user_states.setdefault(
 
             user_id,
@@ -2816,9 +3736,11 @@ async def button_handler(
         )
 
         if "duration" not in state:
+
             state["duration"] = 5
 
         if "resolution" not in state:
+
             state["resolution"] = "480p"
 
         await query.edit_message_text(
@@ -2841,6 +3763,32 @@ async def button_handler(
     if data == "durations":
 
         await query.answer()
+
+        state = user_states.get(
+            user_id,
+            {}
+        )
+
+        if state.get("trial"):
+
+            await query.edit_message_text(
+
+                "🎁 التجربة المجانية مدتها ثابتة "
+                "3 ثواني.",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ رجوع",
+                            callback_data="settings"
+                        )
+                    ]
+
+                ])
+            )
+
+            return
 
         await query.edit_message_text(
 
@@ -2892,9 +3840,19 @@ async def button_handler(
             {}
         )
 
+        if state.get("trial"):
+
+            await query.answer(
+                "التجربة المجانية ثابتة على 3 ثواني.",
+                show_alert=True
+            )
+
+            return
+
         state["duration"] = duration
 
         if "resolution" not in state:
+
             state["resolution"] = "480p"
 
         await query.answer(
@@ -2920,6 +3878,32 @@ async def button_handler(
     if data == "resolutions":
 
         await query.answer()
+
+        state = user_states.get(
+            user_id,
+            {}
+        )
+
+        if state.get("trial"):
+
+            await query.edit_message_text(
+
+                "🎁 التجربة المجانية تستخدم دقة "
+                "480p فقط.",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ رجوع",
+                            callback_data="settings"
+                        )
+                    ]
+
+                ])
+            )
+
+            return
 
         await query.edit_message_text(
 
@@ -2964,9 +3948,19 @@ async def button_handler(
             {}
         )
 
+        if state.get("trial"):
+
+            await query.answer(
+                "التجربة المجانية ثابتة على 480p.",
+                show_alert=True
+            )
+
+            return
+
         state["resolution"] = resolution
 
         if "duration" not in state:
+
             state["duration"] = 5
 
         await query.answer(
@@ -2997,14 +3991,19 @@ async def button_handler(
 
             "ℹ️ طريقة الاستخدام:\n\n"
 
-            "1️⃣ اشحن رصيدك.\n"
-            "2️⃣ اضغط «🎬 إنشاء فيديو».\n"
-            "3️⃣ أرسل صورة.\n"
-            "4️⃣ اكتب وصف الحركة.\n"
-            "5️⃣ اضغط «🎬 إنشاء الفيديو».\n\n"
+            "🎁 أول فيديو:\n"
+            "مجاني — 3 ثواني — 480p.\n\n"
 
-            "⚙️ يمكنك تغيير المدة والدقة "
-            "من الإعدادات.",
+            "💰 بعد التجربة:\n"
+            "اشترِ رصيدًا لإنشاء فيديوهات جديدة.\n\n"
+
+            "⚙️ الفيديوهات المدفوعة:\n"
+            "5 / 10 / 15 ثانية\n"
+            "480p / 720p / 1080p\n\n"
+
+            "📷 أرسل صورة.\n"
+            "✍️ اكتب وصف الحركة.\n"
+            "🎬 اضغط إنشاء الفيديو.",
 
             reply_markup=main_menu(
                 user_id
@@ -3045,19 +4044,6 @@ async def button_handler(
 
         await query.answer()
 
-        # لا نحذف الإعدادات، فقط نرجع للقائمة
-        state = user_states.get(
-            user_id
-        )
-
-        if state and (
-            state.get("waiting_payment_proof")
-            or state.get("image")
-        ):
-
-            # إذا كان هناك عملية جارية لا نحذفها
-            pass
-
         await query.edit_message_text(
 
             "🏠 القائمة الرئيسية",
@@ -3083,7 +4069,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # زر غير معروف
+    # غير معروف
     # =====================================================
 
     await query.answer(
@@ -3172,6 +4158,13 @@ def run_bot():
 
     bot_app.add_handler(
         CommandHandler(
+            "reset_trial",
+            admin_reset_trial
+        )
+    )
+
+    bot_app.add_handler(
+        CommandHandler(
             "stats",
             admin_stats
         )
@@ -3210,7 +4203,7 @@ def run_bot():
     )
 
     # =====================================================
-    # معالجة الأخطاء
+    # الأخطاء
     # =====================================================
 
     bot_app.add_error_handler(
