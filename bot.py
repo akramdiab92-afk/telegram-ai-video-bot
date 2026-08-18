@@ -5,11 +5,14 @@ import sqlite3
 import requests
 
 from flask import Flask
+
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    CopyTextButton,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,14 +22,20 @@ from telegram.ext import (
     ContextTypes,
 )
 
+
+# =========================================================
+# الإعدادات
+# =========================================================
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MAGIC_HOUR_API_KEY = os.environ["MAGIC_HOUR_API_KEY"]
 
 MAGIC_HOUR_BASE = "https://api.magichour.ai/v1"
 
+# Telegram ID الخاص بك
 ADMIN_ID = 625548190
 
-# بيانات شام كاش
+# حساب شام كاش الخاص بك
 SHAM_CASH_NUMBER = "55c04a684471d4b5f504f0e6e2ca7384"
 
 DB_FILE = "bot_data.db"
@@ -35,22 +44,30 @@ app_web = Flask(__name__)
 
 user_states = {}
 
+
+# =========================================================
+# الباقات
+# =========================================================
+
 PACKAGES = {
     "pack_3": {
         "name": "🟢 باقة التجربة",
         "videos": 3,
         "price": 10000,
     },
+
     "pack_10": {
         "name": "🔵 الباقة الأساسية",
         "videos": 10,
         "price": 25000,
     },
+
     "pack_25": {
         "name": "🟣 الباقة المميزة",
         "videos": 25,
         "price": 55000,
     },
+
     "pack_50": {
         "name": "🔥 VIP",
         "videos": 50,
@@ -187,12 +204,12 @@ def remove_balance(user_id, amount):
         amount,
     ))
 
-    changed = cursor.rowcount
+    success = cursor.rowcount > 0
 
     connection.commit()
     connection.close()
 
-    return changed > 0
+    return success
 
 
 # =========================================================
@@ -206,7 +223,12 @@ def home():
 
 def run_web():
 
-    port = int(os.environ.get("PORT", 10000))
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
 
     app_web.run(
         host="0.0.0.0",
@@ -274,9 +296,13 @@ def create_video(
         "assets": {
             "image_file_path": file_path
         },
+
         "end_seconds": duration,
+
         "name": "Telegram AI Video",
+
         "resolution": resolution,
+
         "style": {
             "prompt": prompt
         }
@@ -301,7 +327,8 @@ def wait_for_video(video_id):
         response = requests.get(
             f"{MAGIC_HOUR_BASE}/video-projects/{video_id}",
             headers={
-                "Authorization": f"Bearer {MAGIC_HOUR_API_KEY}"
+                "Authorization":
+                    f"Bearer {MAGIC_HOUR_API_KEY}"
             },
             timeout=60,
         )
@@ -312,14 +339,24 @@ def wait_for_video(video_id):
 
         status = data.get("status")
 
-        print("VIDEO STATUS:", status)
+        print(
+            "VIDEO STATUS:",
+            status
+        )
 
         if status == "complete":
 
-            downloads = data.get("downloads", [])
+            downloads = data.get(
+                "downloads",
+                []
+            )
 
             if downloads:
-                return downloads[0]["url"], data
+
+                return (
+                    downloads[0]["url"],
+                    data
+                )
 
             return None, data
 
@@ -329,7 +366,10 @@ def wait_for_video(video_id):
             "canceled"
         ]:
 
-            print("VIDEO ERROR:", data)
+            print(
+                "VIDEO ERROR:",
+                data
+            )
 
             return None, data
 
@@ -339,7 +379,7 @@ def wait_for_video(video_id):
 
 
 # =========================================================
-# القوائم
+# القائمة الرئيسية
 # =========================================================
 
 def main_menu(user_id):
@@ -347,47 +387,58 @@ def main_menu(user_id):
     balance = get_balance(user_id)
 
     keyboard = [
+
         [
             InlineKeyboardButton(
                 "🎬 إنشاء فيديو",
                 callback_data="new_video"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "💰 شراء رصيد",
                 callback_data="buy"
             ),
+
             InlineKeyboardButton(
                 "💳 رصيدي",
                 callback_data="balance"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "⚙️ الإعدادات",
                 callback_data="settings"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "ℹ️ المساعدة",
                 callback_data="help"
             )
-        ]
+        ],
     ]
 
     if user_id == ADMIN_ID:
 
-        keyboard.append([
-            InlineKeyboardButton(
-                "👑 لوحة الإدارة",
-                callback_data="admin"
-            )
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "👑 لوحة الإدارة",
+                    callback_data="admin"
+                )
+            ]
+        )
 
     return InlineKeyboardMarkup(keyboard)
 
+
+# =========================================================
+# قائمة الباقات
+# =========================================================
 
 def packages_menu():
 
@@ -395,43 +446,63 @@ def packages_menu():
 
     for package_id, package in PACKAGES.items():
 
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{package['name']} — "
-                f"{package['videos']} فيديو — "
-                f"{package['price']:,} ل.س",
-                callback_data=f"package_{package_id}"
-            )
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"{package['name']} — "
+                    f"{package['videos']} فيديو — "
+                    f"{package['price']:,} ل.س",
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "⬅️ رجوع",
-            callback_data="back_main"
+                    callback_data=
+                    f"package_{package_id}"
+                )
+            ]
         )
-    ])
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ رجوع",
+                callback_data="back_main"
+            )
+        ]
+    )
 
     return InlineKeyboardMarkup(keyboard)
 
 
+# =========================================================
+# الإعدادات
+# =========================================================
+
 def settings_menu(state):
 
-    duration = state.get("duration", 5)
-    resolution = state.get("resolution", "480p")
+    duration = state.get(
+        "duration",
+        5
+    )
+
+    resolution = state.get(
+        "resolution",
+        "480p"
+    )
 
     keyboard = [
+
         [
             InlineKeyboardButton(
                 f"⏱️ المدة: {duration} ث",
                 callback_data="durations"
             )
         ],
+
         [
             InlineKeyboardButton(
                 f"📺 الدقة: {resolution}",
                 callback_data="resolutions"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "⬅️ رجوع",
@@ -446,24 +517,28 @@ def settings_menu(state):
 def duration_menu():
 
     keyboard = [
+
         [
             InlineKeyboardButton(
                 "5 ثواني ⭐",
                 callback_data="duration_5"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "10 ثواني",
                 callback_data="duration_10"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "15 ثانية",
                 callback_data="duration_15"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "⬅️ رجوع",
@@ -478,24 +553,28 @@ def duration_menu():
 def resolution_menu():
 
     keyboard = [
+
         [
             InlineKeyboardButton(
                 "480p ⭐",
                 callback_data="resolution_480"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "720p",
                 callback_data="resolution_720"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "1080p",
                 callback_data="resolution_1080"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "⬅️ رجوع",
@@ -508,86 +587,141 @@ def resolution_menu():
 
 
 # =========================================================
-# الأوامر
+# /start
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user = update.effective_user
 
     ensure_user(user)
 
-    user_states.pop(user.id, None)
+    user_states.pop(
+        user.id,
+        None
+    )
 
-    balance = get_balance(user.id)
+    balance = get_balance(
+        user.id
+    )
 
     await update.message.reply_text(
+
         "مرحباً 👋\n\n"
-        "🎬 أهلاً بك في بوت تحويل الصور إلى فيديو "
-        "بالذكاء الاصطناعي.\n\n"
+
+        "🎬 أهلاً بك في بوت تحويل الصور "
+        "إلى فيديو بالذكاء الاصطناعي.\n\n"
+
         f"💰 رصيدك الحالي: {balance} فيديو\n\n"
+
         "📷 أرسل صورة للبدء.",
-        reply_markup=main_menu(user.id)
+
+        reply_markup=main_menu(
+            user.id
+        )
     )
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# /cancel
+# =========================================================
+
+async def cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
-    user_states.pop(user_id, None)
+    user_states.pop(
+        user_id,
+        None
+    )
 
     await update.message.reply_text(
+
         "❌ تم إلغاء العملية.",
-        reply_markup=main_menu(user_id)
+
+        reply_markup=main_menu(
+            user_id
+        )
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================================================
+# /help
+# =========================================================
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
     await update.message.reply_text(
+
         "ℹ️ طريقة الاستخدام:\n\n"
+
         "1️⃣ اشحن رصيدك.\n"
         "2️⃣ اضغط إنشاء فيديو.\n"
         "3️⃣ أرسل صورة.\n"
         "4️⃣ اكتب وصف الحركة.\n"
         "5️⃣ اضغط إنشاء الفيديو.\n\n"
+
         "مثال:\n"
-        "اجعل الأم والابنة تقتربان من بعضهما "
-        "ثم تتعانقان بشكل طبيعي ودافئ، "
-        "مع حركة كاميرا سينمائية خفيفة "
-        "والحفاظ على ملامح الوجه.",
-        reply_markup=main_menu(user_id)
+
+        "اجعل الشخص يبتسم ويحرك رأسه "
+        "بشكل طبيعي مع حركة كاميرا "
+        "سينمائية خفيفة، مع الحفاظ "
+        "على ملامح الوجه.",
+
+        reply_markup=main_menu(
+            user_id
+        )
     )
 
 
 # =========================================================
-# شراء
+# شراء الرصيد
 # =========================================================
 
-async def show_buy(update, context):
+async def show_buy(
+    update,
+    context
+):
 
     query = update.callback_query
 
     await query.answer()
 
     await query.edit_message_text(
+
         "💰 اختر الباقة التي تريد شراءها:\n\n"
-        "بعد اختيار الباقة ستظهر لك بيانات "
-        "الدفع عبر شام كاش.",
+
+        "بعد اختيار الباقة ستظهر لك "
+        "طريقة الدفع عبر شام كاش.",
+
         reply_markup=packages_menu()
     )
 
 
-async def create_payment(update, context, package_id):
+async def create_payment(
+    update,
+    context,
+    package_id
+):
 
     query = update.callback_query
 
     user_id = query.from_user.id
 
-    package = PACKAGES.get(package_id)
+    package = PACKAGES.get(
+        package_id
+    )
 
     if not package:
 
@@ -599,9 +733,11 @@ async def create_payment(update, context, package_id):
         return
 
     connection = db()
+
     cursor = connection.cursor()
 
     cursor.execute("""
+
         INSERT INTO payments
         (
             user_id,
@@ -611,46 +747,101 @@ async def create_payment(update, context, package_id):
             price,
             status
         )
-        VALUES (?, ?, ?, ?, ?, 'pending')
+
+        VALUES
+        (
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            'pending'
+        )
+
     """, (
+
         user_id,
         package_id,
         package["name"],
         package["videos"],
         package["price"],
+
     ))
 
     payment_id = cursor.lastrowid
 
     connection.commit()
+
     connection.close()
 
     await query.answer()
 
+    # =====================================================
+    # زر النسخ
+    # =====================================================
+
+    keyboard = [
+
+        [
+            InlineKeyboardButton(
+                "📋 نسخ حساب شام كاش",
+
+                copy_text=CopyTextButton(
+                    text=SHAM_CASH_NUMBER
+                )
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "❌ إلغاء",
+                callback_data="back_main"
+            )
+        ]
+
+    ]
+
     await query.edit_message_text(
+
         f"🧾 طلب شراء رقم #{payment_id}\n\n"
+
         f"📦 {package['name']}\n"
-        f"🎬 الرصيد: {package['videos']} فيديو\n"
-        f"💰 السعر: {package['price']:,} ل.س\n\n"
+
+        f"🎬 الرصيد: "
+        f"{package['videos']} فيديو\n"
+
+        f"💰 السعر: "
+        f"{package['price']:,} ل.س\n\n"
+
         "💳 طريقة الدفع:\n"
-        "📱 شام كاش\n"
-        f"🔢 رقم الحساب:\n{SHAM_CASH_NUMBER}\n\n"
+        "📱 شام كاش\n\n"
+
+        "🔢 حساب شام كاش:\n"
+
+        f"`{SHAM_CASH_NUMBER}`\n\n"
+
+        "اضغط الزر بالأسفل لنسخ الحساب مباشرة.\n\n"
+
         "📸 بعد التحويل أرسل صورة إثبات الدفع "
         "هنا في البوت.\n\n"
+
         "⚠️ سيتم إضافة الرصيد بعد تأكيد الدفع.",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "❌ إلغاء",
-                    callback_data="back_main"
-                )
-            ]
-        ])
+
+        parse_mode="Markdown",
+
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
     )
 
     user_states[user_id] = {
-        "waiting_payment_proof": True,
-        "payment_id": payment_id,
+
+        "waiting_payment_proof":
+            True,
+
+        "payment_id":
+            payment_id,
+
     }
 
 
@@ -658,7 +849,10 @@ async def create_payment(update, context, package_id):
 # إثبات الدفع
 # =========================================================
 
-async def handle_payment_proof(update, context):
+async def handle_payment_proof(
+    update,
+    context
+):
 
     user_id = update.effective_user.id
 
@@ -667,24 +861,32 @@ async def handle_payment_proof(update, context):
         {}
     )
 
-    if not state.get("waiting_payment_proof"):
+    if not state.get(
+        "waiting_payment_proof"
+    ):
 
         return False
 
-    payment_id = state.get("payment_id")
+    payment_id = state.get(
+        "payment_id"
+    )
 
     if not payment_id:
 
         return False
 
     connection = db()
+
     cursor = connection.cursor()
 
     cursor.execute(
-        "SELECT * FROM payments WHERE id = ? AND user_id = ?",
+
+        "SELECT * FROM payments "
+        "WHERE id = ? AND user_id = ?",
+
         (
             payment_id,
-            user_id,
+            user_id
         )
     )
 
@@ -698,41 +900,63 @@ async def handle_payment_proof(update, context):
 
     try:
 
+        # إرسال صورة الإثبات إليك
         await update.message.forward(
             chat_id=ADMIN_ID
         )
 
+        # إرسال بيانات الطلب
         await context.bot.send_message(
+
             chat_id=ADMIN_ID,
+
             text=(
+
                 "💰 طلب دفع جديد\n\n"
+
                 f"🧾 رقم الطلب: #{payment_id}\n"
+
                 f"👤 المستخدم: {user_id}\n"
-                f"📦 الباقة: {payment['package_name']}\n"
-                f"🎬 الفيديوهات: {payment['videos']}\n"
-                f"💰 السعر: {payment['price']:,} ل.س\n\n"
+
+                f"📦 الباقة: "
+                f"{payment['package_name']}\n"
+
+                f"🎬 الفيديوهات: "
+                f"{payment['videos']}\n"
+
+                f"💰 السعر: "
+                f"{payment['price']:,} ل.س\n\n"
+
                 "اختر الإجراء:"
             ),
+
             reply_markup=InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "✅ تأكيد الدفع",
-                        callback_data=f"approve_{payment_id}"
+                        callback_data=
+                        f"approve_{payment_id}"
                     )
                 ],
+
                 [
                     InlineKeyboardButton(
                         "❌ رفض",
-                        callback_data=f"reject_{payment_id}"
+                        callback_data=
+                        f"reject_{payment_id}"
                     )
                 ]
+
             ])
         )
 
         await update.message.reply_text(
+
             "✅ تم إرسال إثبات الدفع.\n\n"
-            "⏳ سيتم مراجعة التحويل وإضافة الرصيد "
-            "بعد التأكيد."
+
+            "⏳ سيتم مراجعة التحويل "
+            "وإضافة الرصيد بعد التأكيد."
         )
 
         user_states.pop(
@@ -760,7 +984,11 @@ async def handle_payment_proof(update, context):
 # تأكيد الدفع
 # =========================================================
 
-async def approve_payment(update, context, payment_id):
+async def approve_payment(
+    update,
+    context,
+    payment_id
+):
 
     query = update.callback_query
 
@@ -774,6 +1002,7 @@ async def approve_payment(update, context, payment_id):
         return
 
     connection = db()
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -806,14 +1035,19 @@ async def approve_payment(update, context, payment_id):
         return
 
     cursor.execute("""
+
         UPDATE payments
+
         SET status = 'approved'
+
         WHERE id = ?
+
     """, (
         payment_id,
     ))
 
     connection.commit()
+
     connection.close()
 
     add_balance(
@@ -831,22 +1065,39 @@ async def approve_payment(update, context, payment_id):
     )
 
     await query.edit_message_text(
+
         f"✅ تم تأكيد الطلب #{payment_id}\n\n"
-        f"👤 المستخدم: {payment['user_id']}\n"
-        f"🎬 تمت إضافة: {payment['videos']} فيديو\n"
-        f"💰 الرصيد الجديد: {new_balance}"
+
+        f"👤 المستخدم: "
+        f"{payment['user_id']}\n"
+
+        f"🎬 تمت إضافة: "
+        f"{payment['videos']} فيديو\n"
+
+        f"💰 الرصيد الجديد: "
+        f"{new_balance}"
     )
 
     try:
 
         await context.bot.send_message(
+
             chat_id=payment["user_id"],
+
             text=(
+
                 "🎉 تم تأكيد الدفع!\n\n"
-                f"📦 الباقة: {payment['package_name']}\n"
-                f"🎬 تمت إضافة: {payment['videos']} فيديو\n\n"
-                f"💰 رصيدك الحالي: {new_balance} فيديو"
+
+                f"📦 الباقة: "
+                f"{payment['package_name']}\n"
+
+                f"🎬 تمت إضافة: "
+                f"{payment['videos']} فيديو\n\n"
+
+                f"💰 رصيدك الحالي: "
+                f"{new_balance} فيديو"
             ),
+
             reply_markup=main_menu(
                 payment["user_id"]
             )
@@ -860,7 +1111,15 @@ async def approve_payment(update, context, payment_id):
         )
 
 
-async def reject_payment(update, context, payment_id):
+# =========================================================
+# رفض الدفع
+# =========================================================
+
+async def reject_payment(
+    update,
+    context,
+    payment_id
+):
 
     query = update.callback_query
 
@@ -874,6 +1133,7 @@ async def reject_payment(update, context, payment_id):
         return
 
     connection = db()
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -895,14 +1155,19 @@ async def reject_payment(update, context, payment_id):
         return
 
     cursor.execute("""
+
         UPDATE payments
+
         SET status = 'rejected'
+
         WHERE id = ?
+
     """, (
         payment_id,
     ))
 
     connection.commit()
+
     connection.close()
 
     await query.answer(
@@ -911,18 +1176,24 @@ async def reject_payment(update, context, payment_id):
     )
 
     await query.edit_message_text(
+
         f"❌ تم رفض طلب الدفع #{payment_id}."
     )
 
     try:
 
         await context.bot.send_message(
+
             chat_id=payment["user_id"],
+
             text=(
+
                 "❌ تم رفض إثبات الدفع الخاص بك.\n\n"
+
                 "إذا كنت تعتقد أن هناك خطأ، "
                 "تواصل مع الإدارة."
             ),
+
             reply_markup=main_menu(
                 payment["user_id"]
             )
@@ -940,7 +1211,10 @@ async def reject_payment(update, context, payment_id):
 # لوحة الإدارة
 # =========================================================
 
-async def admin_panel(update, context):
+async def admin_panel(
+    update,
+    context
+):
 
     query = update.callback_query
 
@@ -954,6 +1228,7 @@ async def admin_panel(update, context):
         return
 
     connection = db()
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -962,15 +1237,27 @@ async def admin_panel(update, context):
 
     users = cursor.fetchone()["total"]
 
-    cursor.execute(
-        "SELECT COUNT(*) AS total FROM payments WHERE status='pending'"
-    )
+    cursor.execute("""
+
+        SELECT COUNT(*) AS total
+
+        FROM payments
+
+        WHERE status = 'pending'
+
+    """)
 
     pending = cursor.fetchone()["total"]
 
-    cursor.execute(
-        "SELECT COUNT(*) AS total FROM payments WHERE status='approved'"
-    )
+    cursor.execute("""
+
+        SELECT COUNT(*) AS total
+
+        FROM payments
+
+        WHERE status = 'approved'
+
+    """)
 
     approved = cursor.fetchone()["total"]
 
@@ -979,31 +1266,50 @@ async def admin_panel(update, context):
     await query.answer()
 
     await query.edit_message_text(
+
         "👑 لوحة الإدارة\n\n"
+
         f"👥 المستخدمون: {users}\n"
+
         f"⏳ طلبات الدفع المعلقة: {pending}\n"
+
         f"✅ المدفوعات المؤكدة: {approved}\n\n"
-        "الأوامر الإدارية:\n\n"
+
+        "الأوامر:\n\n"
+
         "/add USER_ID AMOUNT\n"
-        "إضافة رصيد لمستخدم\n\n"
+        "إضافة رصيد\n\n"
+
         "/remove USER_ID AMOUNT\n"
-        "سحب رصيد من مستخدم\n\n"
+        "سحب رصيد\n\n"
+
         "/balance USER_ID\n"
-        "عرض رصيد مستخدم\n\n"
+        "عرض رصيد\n\n"
+
         "/stats\n"
-        "إحصائيات البوت",
+        "الإحصائيات",
+
         reply_markup=InlineKeyboardMarkup([
+
             [
                 InlineKeyboardButton(
                     "⬅️ الرئيسية",
                     callback_data="back_main"
                 )
             ]
+
         ])
     )
 
 
-async def admin_add(update, context):
+# =========================================================
+# إضافة رصيد يدوي
+# =========================================================
+
+async def admin_add(
+    update,
+    context
+):
 
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1019,31 +1325,49 @@ async def admin_add(update, context):
 
     try:
 
-        user_id = int(context.args[0])
-        amount = int(context.args[1])
+        user_id = int(
+            context.args[0]
+        )
+
+        amount = int(
+            context.args[1]
+        )
 
         add_balance(
             user_id,
             amount
         )
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         await update.message.reply_text(
+
             "✅ تمت إضافة الرصيد.\n\n"
+
             f"👤 المستخدم: {user_id}\n"
-            f"➕ المبلغ: {amount}\n"
+
+            f"➕ المضاف: {amount}\n"
+
             f"💰 الرصيد الجديد: {balance}"
         )
 
         try:
 
             await context.bot.send_message(
+
                 chat_id=user_id,
+
                 text=(
+
                     "🎉 تمت إضافة رصيد إلى حسابك.\n\n"
-                    f"➕ الرصيد المضاف: {amount} فيديو\n"
-                    f"💰 رصيدك الحالي: {balance} فيديو"
+
+                    f"➕ الرصيد المضاف: "
+                    f"{amount} فيديو\n"
+
+                    f"💰 رصيدك الحالي: "
+                    f"{balance} فيديو"
                 )
             )
 
@@ -1057,7 +1381,14 @@ async def admin_add(update, context):
         )
 
 
-async def admin_remove(update, context):
+# =========================================================
+# سحب رصيد
+# =========================================================
+
+async def admin_remove(
+    update,
+    context
+):
 
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1073,8 +1404,13 @@ async def admin_remove(update, context):
 
     try:
 
-        user_id = int(context.args[0])
-        amount = int(context.args[1])
+        user_id = int(
+            context.args[0]
+        )
+
+        amount = int(
+            context.args[1]
+        )
 
         success = remove_balance(
             user_id,
@@ -1084,17 +1420,23 @@ async def admin_remove(update, context):
         if not success:
 
             await update.message.reply_text(
-                "❌ المستخدم لا يملك رصيدًا كافيًا."
+                "❌ الرصيد غير كافٍ."
             )
 
             return
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         await update.message.reply_text(
+
             "✅ تم سحب الرصيد.\n\n"
+
             f"👤 المستخدم: {user_id}\n"
-            f"➖ المبلغ: {amount}\n"
+
+            f"➖ المسحوب: {amount}\n"
+
             f"💰 الرصيد الجديد: {balance}"
         )
 
@@ -1105,7 +1447,14 @@ async def admin_remove(update, context):
         )
 
 
-async def admin_balance(update, context):
+# =========================================================
+# عرض رصيد مستخدم
+# =========================================================
+
+async def admin_balance(
+    update,
+    context
+):
 
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1121,11 +1470,16 @@ async def admin_balance(update, context):
 
     try:
 
-        user_id = int(context.args[0])
+        user_id = int(
+            context.args[0]
+        )
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         await update.message.reply_text(
+
             f"👤 المستخدم: {user_id}\n"
             f"💰 الرصيد: {balance} فيديو"
         )
@@ -1137,12 +1491,20 @@ async def admin_balance(update, context):
         )
 
 
-async def admin_stats(update, context):
+# =========================================================
+# الإحصائيات
+# =========================================================
+
+async def admin_stats(
+    update,
+    context
+):
 
     if update.effective_user.id != ADMIN_ID:
         return
 
     connection = db()
+
     cursor = connection.cursor()
 
     cursor.execute(
@@ -1151,24 +1513,45 @@ async def admin_stats(update, context):
 
     users = cursor.fetchone()["total"]
 
-    cursor.execute(
-        "SELECT COALESCE(SUM(balance),0) AS total FROM users"
-    )
+    cursor.execute("""
+
+        SELECT COALESCE(
+            SUM(balance),
+            0
+        ) AS total
+
+        FROM users
+
+    """)
 
     total_balance = cursor.fetchone()["total"]
 
     cursor.execute("""
-        SELECT COALESCE(SUM(videos),0) AS total
+
+        SELECT COALESCE(
+            SUM(videos),
+            0
+        ) AS total
+
         FROM payments
-        WHERE status='approved'
+
+        WHERE status = 'approved'
+
     """)
 
     sold = cursor.fetchone()["total"]
 
     cursor.execute("""
-        SELECT COALESCE(SUM(price),0) AS total
+
+        SELECT COALESCE(
+            SUM(price),
+            0
+        ) AS total
+
         FROM payments
-        WHERE status='approved'
+
+        WHERE status = 'approved'
+
     """)
 
     revenue = cursor.fetchone()["total"]
@@ -1176,44 +1559,67 @@ async def admin_stats(update, context):
     connection.close()
 
     await update.message.reply_text(
+
         "📊 إحصائيات البوت\n\n"
+
         f"👥 المستخدمون: {users}\n"
-        f"💰 مجموع الأرصدة الحالية: {total_balance}\n"
-        f"🎬 الفيديوهات المباعة: {sold}\n"
-        f"💵 إجمالي المبيعات: {revenue:,} ل.س"
+
+        f"💰 الأرصدة الحالية: "
+        f"{total_balance}\n"
+
+        f"🎬 الفيديوهات المباعة: "
+        f"{sold}\n"
+
+        f"💵 إجمالي المبيعات: "
+        f"{revenue:,} ل.س"
     )
 
 
 # =========================================================
-# الصور
+# استقبال الصور
 # =========================================================
 
-async def handle_photo(update, context):
+async def handle_photo(
+    update,
+    context
+):
 
     user_id = update.effective_user.id
 
-    ensure_user(update.effective_user)
+    ensure_user(
+        update.effective_user
+    )
 
+    # إذا كانت الصورة إثبات دفع
     if await handle_payment_proof(
         update,
         context
     ):
+
         return
 
-    balance = get_balance(user_id)
+    balance = get_balance(
+        user_id
+    )
 
     if balance <= 0:
 
         await update.message.reply_text(
+
             "💳 لا يوجد لديك رصيد كافٍ.\n\n"
-            "اشترِ رصيدًا أولاً حتى تتمكن من إنشاء الفيديو.",
+
+            "اشترِ رصيدًا أولاً حتى تتمكن "
+            "من إنشاء الفيديو.",
+
             reply_markup=InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "💰 شراء رصيد",
                         callback_data="buy"
                     )
                 ]
+
             ])
         )
 
@@ -1228,20 +1634,33 @@ async def handle_photo(update, context):
         image_bytes = await telegram_file.download_as_bytearray()
 
         user_states[user_id] = {
-            "image": bytes(image_bytes),
-            "waiting_for_prompt": True,
-            "duration": 5,
-            "resolution": "480p",
+
+            "image":
+                bytes(image_bytes),
+
+            "waiting_for_prompt":
+                True,
+
+            "duration":
+                5,
+
+            "resolution":
+                "480p",
+
         }
 
         await update.message.reply_text(
+
             "✅ وصلت الصورة!\n\n"
+
             "✍️ الآن اكتب وصف الحركة التي تريدها.\n\n"
+
             "مثال:\n"
-            "اجعل الأم والابنة تقتربان من بعضهما "
-            "ثم تتعانقان بشكل طبيعي ودافئ، "
-            "مع حركة كاميرا سينمائية خفيفة، "
-            "وحافظ على ملامح الوجه كما هي."
+
+            "اجعل الشخص يبتسم ويحرك رأسه "
+            "ببطء مع حركة كاميرا سينمائية "
+            "خفيفة، وحافظ على ملامح الوجه "
+            "كما هي."
         )
 
     except Exception as error:
@@ -1257,21 +1676,28 @@ async def handle_photo(update, context):
 
 
 # =========================================================
-# النص
+# استقبال النص
 # =========================================================
 
-async def handle_text(update, context):
+async def handle_text(
+    update,
+    context
+):
 
     user_id = update.effective_user.id
 
-    ensure_user(update.effective_user)
+    ensure_user(
+        update.effective_user
+    )
 
     state = user_states.get(
         user_id,
         {}
     )
 
-    if state.get("waiting_payment_proof"):
+    if state.get(
+        "waiting_payment_proof"
+    ):
 
         await update.message.reply_text(
             "📸 أرسل صورة إثبات الدفع."
@@ -1282,8 +1708,12 @@ async def handle_text(update, context):
     if "image" not in state:
 
         await update.message.reply_text(
+
             "📷 أرسل صورة أولاً.",
-            reply_markup=main_menu(user_id)
+
+            reply_markup=main_menu(
+                user_id
+            )
         )
 
         return
@@ -1299,43 +1729,59 @@ async def handle_text(update, context):
         return
 
     state["prompt"] = prompt
+
     state["waiting_for_prompt"] = False
 
     keyboard = [
+
         [
             InlineKeyboardButton(
                 "🎬 إنشاء الفيديو",
                 callback_data="generate"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "⚙️ الإعدادات",
                 callback_data="settings"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "❌ إلغاء",
                 callback_data="cancel_generation"
             )
         ]
+
     ]
 
     await update.message.reply_text(
-        "📝 تم استلام الوصف:\n\n"
+
+        "📝 تم استلام وصف الحركة:\n\n"
+
         f"{prompt}\n\n"
-        f"💰 رصيدك الحالي: {get_balance(user_id)} فيديو\n\n"
-        "إذا كان كل شيء مناسبًا اضغط إنشاء الفيديو.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+
+        f"💰 رصيدك الحالي: "
+        f"{get_balance(user_id)} فيديو\n\n"
+
+        "اضغط إنشاء الفيديو للبدء.",
+
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
     )
 
 
 # =========================================================
-# توليد الفيديو
+# إنشاء الفيديو
 # =========================================================
 
-async def generate_video(update, context):
+async def generate_video(
+    update,
+    context
+):
 
     query = update.callback_query
 
@@ -1348,26 +1794,37 @@ async def generate_video(update, context):
         {}
     )
 
-    balance = get_balance(user_id)
+    balance = get_balance(
+        user_id
+    )
 
     if balance <= 0:
 
         await query.edit_message_text(
+
             "💳 لا يوجد رصيد كافٍ.\n\n"
+
             "اشترِ رصيدًا أولاً.",
+
             reply_markup=InlineKeyboardMarkup([
+
                 [
                     InlineKeyboardButton(
                         "💰 شراء رصيد",
                         callback_data="buy"
                     )
                 ]
+
             ])
         )
 
         return
 
-    if "image" not in state or "prompt" not in state:
+    if (
+        "image" not in state
+        or
+        "prompt" not in state
+    ):
 
         await query.edit_message_text(
             "❌ أرسل صورة واكتب وصف الحركة أولاً."
@@ -1376,13 +1833,18 @@ async def generate_video(update, context):
         return
 
     await query.edit_message_text(
+
         "⏳ جاري إنشاء الفيديو...\n\n"
-        "🎬 يرجى الانتظار حتى انتهاء المعالجة."
+
+        "🎬 تم إرسال الطلب إلى Magic Hour.\n"
+
+        "قد يستغرق إنشاء الفيديو بعض الوقت."
     )
 
     try:
 
         image_bytes = state["image"]
+
         prompt = state["prompt"]
 
         duration = state.get(
@@ -1395,8 +1857,9 @@ async def generate_video(update, context):
             "480p"
         )
 
-        upload_url, file_path = create_upload_url(
-            "jpg"
+        # رفع الصورة
+        upload_url, file_path = (
+            create_upload_url("jpg")
         )
 
         upload_image(
@@ -1404,10 +1867,15 @@ async def generate_video(update, context):
             image_bytes
         )
 
+        # إنشاء الفيديو
         video_data = create_video(
+
             file_path=file_path,
+
             prompt=prompt,
+
             duration=duration,
+
             resolution=resolution
         )
 
@@ -1418,19 +1886,24 @@ async def generate_video(update, context):
             video_id
         )
 
-        video_url, final_data = wait_for_video(
-            video_id
+        # الانتظار
+        video_url, final_data = (
+            wait_for_video(video_id)
         )
 
         if not video_url:
 
             await query.edit_message_text(
+
                 "❌ لم يتم إنشاء الفيديو.\n\n"
-                "لم يتم خصم الرصيد لأن العملية لم تنجح."
+
+                "لم يتم خصم الرصيد لأن العملية "
+                "لم تنجح."
             )
 
             return
 
+        # تحميل الفيديو
         video_response = requests.get(
             video_url,
             timeout=180
@@ -1438,6 +1911,7 @@ async def generate_video(update, context):
 
         video_response.raise_for_status()
 
+        # خصم فيديو واحد
         removed = remove_balance(
             user_id,
             1
@@ -1446,7 +1920,9 @@ async def generate_video(update, context):
         if not removed:
 
             await query.edit_message_text(
-                "⚠️ تم إنشاء الفيديو لكن تعذر خصم الرصيد."
+
+                "⚠️ تم إنشاء الفيديو، "
+                "لكن تعذر خصم الرصيد."
             )
 
             return
@@ -1455,13 +1931,21 @@ async def generate_video(update, context):
             user_id
         )
 
+        # إرسال الفيديو
         await context.bot.send_video(
+
             chat_id=user_id,
+
             video=video_response.content,
+
             caption=(
+
                 "🎬 تم إنشاء الفيديو بنجاح!\n\n"
+
                 "💳 تم خصم فيديو واحد.\n"
-                f"💰 رصيدك المتبقي: {new_balance} فيديو"
+
+                f"💰 رصيدك المتبقي: "
+                f"{new_balance} فيديو"
             )
         )
 
@@ -1471,9 +1955,15 @@ async def generate_video(update, context):
         )
 
         await query.edit_message_text(
-            "✅ تم إرسال الفيديو بنجاح! 🎬\n\n"
-            f"💰 رصيدك المتبقي: {new_balance} فيديو",
-            reply_markup=main_menu(user_id)
+
+            "✅ تم إنشاء الفيديو وإرساله بنجاح! 🎬\n\n"
+
+            f"💰 رصيدك المتبقي: "
+            f"{new_balance} فيديو",
+
+            reply_markup=main_menu(
+                user_id
+            )
         )
 
     except requests.HTTPError as error:
@@ -1494,8 +1984,11 @@ async def generate_video(update, context):
             pass
 
         await query.edit_message_text(
+
             "❌ Magic Hour رفض الطلب.\n\n"
-            "جرّب استخدام 480p و5 ثواني."
+
+            "جرّب الإعدادات الافتراضية:\n"
+            "480p — 5 ثواني."
         )
 
     except Exception as error:
@@ -1506,7 +1999,9 @@ async def generate_video(update, context):
         )
 
         await query.edit_message_text(
+
             "❌ حدث خطأ أثناء إنشاء الفيديو.\n\n"
+
             "لم يتم خصم الرصيد."
         )
 
@@ -1515,22 +2010,35 @@ async def generate_video(update, context):
 # الأزرار
 # =========================================================
 
-async def button_handler(update, context):
+async def button_handler(
+    update,
+    context
+):
 
     query = update.callback_query
 
     user_id = query.from_user.id
 
-    ensure_user(query.from_user)
+    ensure_user(
+        query.from_user
+    )
 
     data = query.data
 
+    # شراء
     if data == "buy":
 
-        await show_buy(update, context)
+        await show_buy(
+            update,
+            context
+        )
+
         return
 
-    if data.startswith("package_"):
+    # اختيار باقة
+    if data.startswith(
+        "package_"
+    ):
 
         package_id = data.replace(
             "package_",
@@ -1545,7 +2053,10 @@ async def button_handler(update, context):
 
         return
 
-    if data.startswith("approve_"):
+    # تأكيد الدفع
+    if data.startswith(
+        "approve_"
+    ):
 
         payment_id = int(
             data.replace(
@@ -1562,7 +2073,10 @@ async def button_handler(update, context):
 
         return
 
-    if data.startswith("reject_"):
+    # رفض الدفع
+    if data.startswith(
+        "reject_"
+    ):
 
         payment_id = int(
             data.replace(
@@ -1579,6 +2093,7 @@ async def button_handler(update, context):
 
         return
 
+    # لوحة الإدارة
     if data == "admin":
 
         await admin_panel(
@@ -1588,87 +2103,125 @@ async def button_handler(update, context):
 
         return
 
+    # إنشاء فيديو
     if data == "new_video":
 
         await query.answer()
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         if balance <= 0:
 
             await query.edit_message_text(
+
                 "💳 رصيدك صفر.\n\n"
                 "اشترِ رصيدًا أولاً.",
+
                 reply_markup=InlineKeyboardMarkup([
+
                     [
                         InlineKeyboardButton(
                             "💰 شراء رصيد",
                             callback_data="buy"
                         )
                     ]
+
                 ])
             )
 
             return
 
         user_states[user_id] = {
-            "waiting_for_photo": True,
-            "duration": 5,
-            "resolution": "480p",
+
+            "waiting_for_photo":
+                True,
+
+            "duration":
+                5,
+
+            "resolution":
+                "480p",
         }
 
         await query.edit_message_text(
-            "📷 أرسل الصورة التي تريد تحويلها إلى فيديو.\n\n"
-            f"💰 رصيدك: {balance} فيديو"
+
+            "📷 أرسل الصورة التي تريد "
+            "تحويلها إلى فيديو.\n\n"
+
+            f"💰 رصيدك: "
+            f"{balance} فيديو"
         )
 
         return
 
+    # الرصيد
     if data == "balance":
 
         await query.answer()
 
-        balance = get_balance(user_id)
+        balance = get_balance(
+            user_id
+        )
 
         await query.edit_message_text(
+
             "💳 رصيدك الحالي:\n\n"
+
             f"🎬 {balance} فيديو",
-            reply_markup=main_menu(user_id)
+
+            reply_markup=main_menu(
+                user_id
+            )
         )
 
         return
 
+    # الإعدادات
     if data == "settings":
 
         await query.answer()
 
         state = user_states.setdefault(
+
             user_id,
+
             {
                 "duration": 5,
-                "resolution": "480p",
+                "resolution": "480p"
             }
         )
 
         await query.edit_message_text(
-            "⚙️ إعدادات الفيديو:",
-            reply_markup=settings_menu(state)
+
+            "⚙️ إعدادات الفيديو:\n\n"
+            "اختر الإعداد الذي تريد تغييره.",
+
+            reply_markup=settings_menu(
+                state
+            )
         )
 
         return
 
+    # المدة
     if data == "durations":
 
         await query.answer()
 
         await query.edit_message_text(
+
             "⏱️ اختر مدة الفيديو:",
+
             reply_markup=duration_menu()
         )
 
         return
 
-    if data.startswith("duration_"):
+    if data.startswith(
+        "duration_"
+    ):
 
         duration = int(
             data.replace(
@@ -1687,29 +2240,42 @@ async def button_handler(update, context):
         await query.answer()
 
         await query.edit_message_text(
-            f"✅ المدة: {duration} ثانية",
-            reply_markup=settings_menu(state)
+
+            f"✅ تم اختيار "
+            f"{duration} ثانية.",
+
+            reply_markup=settings_menu(
+                state
+            )
         )
 
         return
 
+    # الدقة
     if data == "resolutions":
 
         await query.answer()
 
         await query.edit_message_text(
+
             "📺 اختر الدقة:",
+
             reply_markup=resolution_menu()
         )
 
         return
 
-    if data.startswith("resolution_"):
+    if data.startswith(
+        "resolution_"
+    ):
 
-        resolution = data.replace(
-            "resolution_",
-            ""
-        ) + "p"
+        resolution = (
+            data.replace(
+                "resolution_",
+                ""
+            )
+            + "p"
+        )
 
         state = user_states.setdefault(
             user_id,
@@ -1721,27 +2287,39 @@ async def button_handler(update, context):
         await query.answer()
 
         await query.edit_message_text(
-            f"✅ الدقة: {resolution}",
-            reply_markup=settings_menu(state)
+
+            f"✅ تم اختيار الدقة "
+            f"{resolution}.",
+
+            reply_markup=settings_menu(
+                state
+            )
         )
 
         return
 
+    # المساعدة
     if data == "help":
 
         await query.answer()
 
         await query.edit_message_text(
-            "ℹ️ أرسل صورة ثم اكتب وصف الحركة.\n\n"
-            "مثال:\n"
-            "اجعل الشخص يبتسم ويتحرك بشكل طبيعي "
-            "مع حركة كاميرا سينمائية خفيفة "
-            "مع الحفاظ على ملامح الوجه.",
-            reply_markup=main_menu(user_id)
+
+            "ℹ️ طريقة الاستخدام:\n\n"
+
+            "اشحن رصيدك، ثم أرسل صورة "
+            "واكتب وصف الحركة.\n\n"
+
+            "بعد ذلك اضغط إنشاء الفيديو.",
+
+            reply_markup=main_menu(
+                user_id
+            )
         )
 
         return
 
+    # إلغاء
     if data == "cancel_generation":
 
         await query.answer()
@@ -1752,23 +2330,33 @@ async def button_handler(update, context):
         )
 
         await query.edit_message_text(
+
             "❌ تم إلغاء العملية.",
-            reply_markup=main_menu(user_id)
+
+            reply_markup=main_menu(
+                user_id
+            )
         )
 
         return
 
+    # الرئيسية
     if data == "back_main":
 
         await query.answer()
 
         await query.edit_message_text(
+
             "🏠 القائمة الرئيسية",
-            reply_markup=main_menu(user_id)
+
+            reply_markup=main_menu(
+                user_id
+            )
         )
 
         return
 
+    # إنشاء الفيديو
     if data == "generate":
 
         await generate_video(
