@@ -1,10 +1,8 @@
 import os
-import time
 import threading
 import sqlite3
 import asyncio
 import tempfile
-from pathlib import Path
 
 from flask import Flask
 
@@ -33,54 +31,38 @@ from gradio_client import Client, handle_file
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# اختياري إذا كان Space يتطلب Token
-# لا تضع التوكن داخل الكود.
 HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 
-# Hugging Face Wan 2.2
 HF_SPACE = "zerogpu-aoti/wan2-2-fp8da-aoti-faster"
 HF_API_NAME = "/generate_video"
 
-# Telegram ID الخاص بك
 ADMIN_ID = 625548190
 
-# حساب شام كاش
 SHAM_CASH_NUMBER = "55c04a684471d4b5f504f0e6e2ca7384"
 
 DB_FILE = "bot_data.db"
 
 app_web = Flask(__name__)
 
-# حالات المستخدمين المؤقتة
 user_states = {}
 
-# قفل إنشاء الفيديو لكل مستخدم
 generation_locks = {}
 
-# قفل عمليات الدفع
 payment_lock = threading.Lock()
 
 
 # =========================================================
-# إعدادات Wan 2.2
+# إعدادات الفيديو
 # =========================================================
 
-# المدد التي يدعمها هذا الـSpace تقريباً:
-# 8-80 frames @ 16fps
-# لذلك نستخدم 3 / 4 / 5 ثوانٍ.
-
-ALLOWED_DURATIONS = [
-    3,
-    4,
-    5,
-]
+ALLOWED_DURATIONS = [3, 4, 5]
 
 DEFAULT_DURATION = 3
 
-# عدد خطوات الاستدلال
 DEFAULT_STEPS = 6
 
 DEFAULT_GUIDANCE = 1
+
 DEFAULT_GUIDANCE_2 = 1
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -169,11 +151,15 @@ def init_db():
         )
     """)
 
-    # ترقية قاعدة بيانات قديمة إذا كانت لا تحتوي free_trial_used
     cursor.execute("PRAGMA table_info(users)")
-    columns = [row["name"] for row in cursor.fetchall()]
+
+    columns = [
+        row["name"]
+        for row in cursor.fetchall()
+    ]
 
     if "free_trial_used" not in columns:
+
         cursor.execute("""
             ALTER TABLE users
             ADD COLUMN free_trial_used INTEGER DEFAULT 0
@@ -184,7 +170,7 @@ def init_db():
 
 
 # =========================================================
-# المستخدمون
+# المستخدم
 # =========================================================
 
 def ensure_user(user):
@@ -213,8 +199,7 @@ def ensure_user(user):
 
     cursor.execute("""
         UPDATE users
-        SET
-            username = ?,
+        SET username = ?,
             first_name = ?
         WHERE user_id = ?
     """, (
@@ -357,22 +342,25 @@ def mark_free_trial_used(user_id):
 def get_generation_lock(user_id):
 
     if user_id not in generation_locks:
+
         generation_locks[user_id] = threading.Lock()
 
     return generation_locks[user_id]
 
 
 # =========================================================
-# Render
+# Flask / Render
 # =========================================================
 
 @app_web.route("/")
 def home():
+
     return "Telegram AI Video Bot is running!"
 
 
 @app_web.route("/health")
 def health():
+
     return "OK"
 
 
@@ -393,7 +381,7 @@ def run_web():
 
 
 # =========================================================
-# Hugging Face / Wan 2.2
+# Hugging Face
 # =========================================================
 
 def get_hf_client():
@@ -420,33 +408,25 @@ def get_hf_client():
 
 def normalize_video_result(result):
 
-    """
-    Wan Space يرجع:
-    tuple:
-        [0] filepath
-        [1] seed
-
-    هذه الدالة تتعامل أيضاً مع بعض صيغ Gradio الأخرى.
-    """
-
     if result is None:
         return None
 
     video_output = result
 
     if isinstance(result, tuple):
+
         if len(result) == 0:
             return None
 
         video_output = result[0]
 
     elif isinstance(result, list):
+
         if len(result) == 0:
             return None
 
         video_output = result[0]
 
-    # filepath كنص
     if isinstance(video_output, str):
 
         if os.path.exists(video_output):
@@ -454,7 +434,6 @@ def normalize_video_result(result):
 
         return None
 
-    # Gradio FileData قد يرجع dict
     if isinstance(video_output, dict):
 
         path = video_output.get("path")
@@ -477,13 +456,19 @@ def generate_wan_video(
 ):
 
     if duration not in ALLOWED_DURATIONS:
+
         duration = DEFAULT_DURATION
 
     print("=" * 60)
+
     print("WAN 2.2 GENERATION STARTED")
+
     print("Image:", image_path)
+
     print("Duration:", duration)
+
     print("Prompt:", prompt)
+
     print("=" * 60)
 
     client = get_hf_client()
@@ -730,7 +715,7 @@ def duration_menu():
 
 
 # =========================================================
-# /start
+# START
 # =========================================================
 
 async def start(
@@ -791,7 +776,7 @@ async def start(
 
 
 # =========================================================
-# /cancel
+# CANCEL
 # =========================================================
 
 async def cancel(
@@ -801,10 +786,31 @@ async def cancel(
 
     user_id = update.effective_user.id
 
-    user_states.pop(
+    state = user_states.pop(
         user_id,
         None
     )
+
+    if state:
+
+        image_path = state.get(
+            "image_path"
+        )
+
+        if image_path:
+
+            try:
+
+                if os.path.exists(
+                    image_path
+                ):
+
+                    os.remove(
+                        image_path
+                    )
+
+            except Exception:
+                pass
 
     await update.message.reply_text(
 
@@ -817,7 +823,7 @@ async def cancel(
 
 
 # =========================================================
-# /help
+# HELP
 # =========================================================
 
 async def help_command(
@@ -938,6 +944,7 @@ async def create_payment(
 
         [
             InlineKeyboardButton(
+
                 "📋 نسخ حساب شام كاش",
 
                 copy_text=CopyTextButton(
@@ -987,11 +994,9 @@ async def create_payment(
 
     user_states[user_id] = {
 
-        "waiting_payment_proof":
-            True,
+        "waiting_payment_proof": True,
 
-        "payment_id":
-            payment_id,
+        "payment_id": payment_id,
     }
 
 
@@ -1014,6 +1019,7 @@ async def handle_payment_proof(
     if not state.get(
         "waiting_payment_proof"
     ):
+
         return False
 
     payment_id = state.get(
@@ -1021,6 +1027,7 @@ async def handle_payment_proof(
     )
 
     if not payment_id:
+
         return False
 
     connection = db()
@@ -1862,7 +1869,7 @@ async def handle_photo(
         update.effective_user
     )
 
-    # أولاً: هل هذه صورة إثبات دفع؟
+    # فحص إثبات الدفع أولاً
     if await handle_payment_proof(
         update,
         context
@@ -1891,7 +1898,6 @@ async def handle_photo(
 
         return
 
-    # السماح بالتجربة المجانية أو الرصيد
     trial_available = not has_free_trial(
         user_id
     )
@@ -1907,6 +1913,7 @@ async def handle_photo(
             "💳 لا يوجد لديك رصيد كافٍ.\n\n"
 
             "لقد استخدمت تجربتك المجانية.\n"
+
             "اشترِ رصيداً لإنشاء فيديو جديد.",
 
             reply_markup=InlineKeyboardMarkup([
@@ -1954,8 +1961,8 @@ async def handle_photo(
             DEFAULT_DURATION
         )
 
-        # إذا كانت تجربة مجانية، نجبرها على 3 ثوانٍ
         if trial_available:
+
             duration = 3
 
         user_states[user_id] = {
@@ -1998,6 +2005,7 @@ async def handle_photo(
                 "✍️ الآن اكتب وصف الحركة التي تريدها.\n\n"
 
                 "مثال:\n"
+
                 "اجعل الشخص يبتسم ويحرك رأسه "
                 "ببطء مع حركة كاميرا سينمائية "
                 "خفيفة، وحافظ على ملامح الوجه."
@@ -2013,9 +2021,11 @@ async def handle_photo(
         if temp_image_path:
 
             try:
+
                 os.remove(
                     temp_image_path
                 )
+
             except Exception:
                 pass
 
@@ -2063,6 +2073,7 @@ async def handle_text(
         await update.message.reply_text(
 
             "📷 أنا بانتظار الصورة.\n\n"
+
             "أرسل صورة للمتابعة."
         )
 
@@ -2103,6 +2114,7 @@ async def handle_text(
     if state.get(
         "is_free_trial"
     ):
+
         duration = 3
 
     keyboard = [
@@ -2130,7 +2142,9 @@ async def handle_text(
 
     ]
 
-    if state.get("is_free_trial"):
+    if state.get(
+        "is_free_trial"
+    ):
 
         balance_text = (
             "🎁 تجربة مجانية — 3 ثوانٍ"
@@ -2192,8 +2206,11 @@ async def generate_video(
         return
 
     image_path = None
+
     is_trial = False
+
     trial_marked = False
+
     charged = False
 
     try:
@@ -2231,9 +2248,9 @@ async def generate_video(
 
             duration = DEFAULT_DURATION
 
-        # =============================================
-        # التحقق من البيانات
-        # =============================================
+        # -------------------------------------------------
+        # التحقق من الصورة
+        # -------------------------------------------------
 
         if not image_path or not os.path.exists(
             image_path
@@ -2242,6 +2259,7 @@ async def generate_video(
             await query.edit_message_text(
 
                 "❌ لم أجد الصورة.\n\n"
+
                 "أرسل صورة جديدة وحاول مرة أخرى.",
 
                 reply_markup=main_menu(
@@ -2250,6 +2268,10 @@ async def generate_video(
             )
 
             return
+
+        # -------------------------------------------------
+        # التحقق من الوصف
+        # -------------------------------------------------
 
         if not prompt:
 
@@ -2264,13 +2286,12 @@ async def generate_video(
 
             return
 
-        # =============================================
-        # التحقق من التجربة أو الرصيد
-        # =============================================
+        # -------------------------------------------------
+        # التحقق من الرصيد
+        # -------------------------------------------------
 
         if is_trial:
 
-            # حماية إضافية
             if has_free_trial(
                 user_id
             ):
@@ -2307,6 +2328,13 @@ async def generate_video(
                                 "💰 شراء رصيد",
                                 callback_data="buy"
                             )
+                        ],
+
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ الرئيسية",
+                                callback_data="back_main"
+                            )
                         ]
 
                     ])
@@ -2314,9 +2342,9 @@ async def generate_video(
 
                 return
 
-        # =============================================
+        # -------------------------------------------------
         # رسالة البداية
-        # =============================================
+        # -------------------------------------------------
 
         if is_trial:
 
@@ -2346,10 +2374,9 @@ async def generate_video(
                 "قد يستغرق التوليد بعض الوقت."
             )
 
-        # =============================================
-        # تشغيل Gradio في thread
-        # حتى لا يتجمد Telegram
-        # =============================================
+        # -------------------------------------------------
+        # توليد الفيديو
+        # -------------------------------------------------
 
         try:
 
@@ -2367,9 +2394,19 @@ async def generate_video(
         except Exception as error:
 
             print("=" * 60)
-            print("❌❌❌ WAN GENERATION ERROR")
-            print("ERROR TYPE:", type(error).__name__)
-            print("ERROR:", repr(error))
+
+            print("❌ WAN GENERATION ERROR")
+
+            print(
+                "ERROR TYPE:",
+                type(error).__name__
+            )
+
+            print(
+                "ERROR:",
+                repr(error)
+            )
+
             print("=" * 60)
 
             await query.edit_message_text(
@@ -2386,9 +2423,9 @@ async def generate_video(
 
             return
 
-        # =============================================
-        # التأكد من الفيديو
-        # =============================================
+        # -------------------------------------------------
+        # التحقق من الفيديو
+        # -------------------------------------------------
 
         if not video_path:
 
@@ -2412,10 +2449,9 @@ async def generate_video(
 
             return
 
-        # =============================================
-        # تجربة مجانية:
-        # نعلّمها كمستخدمة فقط بعد نجاح التوليد
-        # =============================================
+        # -------------------------------------------------
+        # التجربة المجانية
+        # -------------------------------------------------
 
         if is_trial:
 
@@ -2429,23 +2465,21 @@ async def generate_video(
                     "WARNING: Could not mark free trial."
                 )
 
-                # لا نرسل الفيديو إذا لم نتمكن
-                # من تسجيل التجربة
                 await query.edit_message_text(
 
                     "⚠️ تم إنشاء الفيديو، "
                     "لكن حدث خطأ في تسجيل التجربة المجانية.\n\n"
 
                     "تم إيقاف الإرسال لحماية النظام.\n"
+
                     "تواصل مع الإدارة."
                 )
 
                 return
 
-        # =============================================
-        # الفيديو المدفوع:
-        # الخصم فقط بعد نجاح التوليد
-        # =============================================
+        # -------------------------------------------------
+        # خصم الرصيد
+        # -------------------------------------------------
 
         if not is_trial:
 
@@ -2475,9 +2509,9 @@ async def generate_video(
 
             charged = True
 
-        # =============================================
+        # -------------------------------------------------
         # إرسال الفيديو
-        # =============================================
+        # -------------------------------------------------
 
         await query.edit_message_text(
 
@@ -2496,9 +2530,13 @@ async def generate_video(
                 if is_trial:
 
                     caption = (
+
                         "🎁 انتهت تجربتك المجانية!\n\n"
+
                         "🎬 تم إنشاء الفيديو بنجاح.\n"
+
                         "⏱️ المدة: 3 ثوانٍ\n\n"
+
                         "💡 يمكنك الآن شراء رصيد "
                         "لإنشاء المزيد من الفيديوهات."
                     )
@@ -2537,8 +2575,6 @@ async def generate_video(
                 repr(send_error)
             )
 
-            # إذا كان مدفوعاً والخصم تم،
-            # لا نعيده تلقائياً لتجنب مشاكل الخصم المزدوج.
             try:
 
                 await context.bot.send_message(
@@ -2577,31 +2613,41 @@ async def generate_video(
 
             return
 
-        # =============================================
-        # نجاح كامل
-        # =============================================
+        # -------------------------------------------------
+        # النجاح الكامل
+        # -------------------------------------------------
 
         if is_trial:
-    await query.edit_message_text(
-        "🎉 تم إنشاء تجربتك المجانية وإرسالها بنجاح! 🎬\n\n"
-        "🎁 انتهت تجربتك المجانية.\n\n"
-        "يمكنك الآن شراء رصيد وإنشاء المزيد من الفيديوهات "
-        "بواسطة Wan 2.2 14B ⚡",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "💰 شراء رصيد",
-                    callback_data="buy"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🏠 القائمة الرئيسية",
-                    callback_data="back_main"
-                )
-            ]
-        ])
-    )
+
+            await query.edit_message_text(
+
+                "🎉 تم إنشاء تجربتك المجانية "
+                "وإرسالها بنجاح! 🎬\n\n"
+
+                "🎁 انتهت تجربتك المجانية.\n\n"
+
+                "يمكنك الآن شراء رصيد وإنشاء "
+                "المزيد من الفيديوهات بواسطة "
+                "Wan 2.2 14B ⚡",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "💰 شراء رصيد",
+                            callback_data="buy"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "🏠 القائمة الرئيسية",
+                            callback_data="back_main"
+                        )
+                    ]
+
+                ])
+            )
 
         else:
 
@@ -2621,7 +2667,10 @@ async def generate_video(
                 )
             )
 
+        # -------------------------------------------------
         # تنظيف الحالة
+        # -------------------------------------------------
+
         user_states.pop(
             user_id,
             None
@@ -2629,7 +2678,10 @@ async def generate_video(
 
     finally:
 
-        # حذف صورة المستخدم المؤقتة
+        # -------------------------------------------------
+        # حذف الصورة المؤقتة
+        # -------------------------------------------------
+
         if image_path:
 
             try:
@@ -2649,7 +2701,12 @@ async def generate_video(
                     repr(error)
                 )
 
+        # -------------------------------------------------
+        # تحرير القفل
+        # -------------------------------------------------
+
         try:
+
             lock.release()
 
             print(
@@ -2679,9 +2736,9 @@ async def button_handler(
 
     data = query.data or ""
 
-    # =====================================================
+    # -----------------------------------------------------
     # شراء
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "buy":
 
@@ -2692,9 +2749,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # الباقة
-    # =====================================================
+    # -----------------------------------------------------
 
     if data.startswith(
         "package_"
@@ -2714,9 +2771,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # تأكيد الدفع
-    # =====================================================
+    # -----------------------------------------------------
 
     if data.startswith(
         "approve_"
@@ -2749,9 +2806,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # رفض الدفع
-    # =====================================================
+    # -----------------------------------------------------
 
     if data.startswith(
         "reject_"
@@ -2784,9 +2841,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # الإدارة
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "admin":
 
@@ -2797,9 +2854,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # إنشاء فيديو
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "new_video":
 
@@ -2844,7 +2901,6 @@ async def button_handler(
 
             return
 
-        # الحفاظ على الإعدادات
         old_state = user_states.get(
             user_id,
             {}
@@ -2856,6 +2912,7 @@ async def button_handler(
         )
 
         if duration not in ALLOWED_DURATIONS:
+
             duration = DEFAULT_DURATION
 
         user_states[user_id] = {
@@ -2900,9 +2957,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # الرصيد
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "balance":
 
@@ -2917,9 +2974,13 @@ async def button_handler(
         )
 
         trial_text = (
+
             "❌ مستخدمة"
+
             if trial_used
+
             else
+
             "🎁 متاحة — 3 ثوانٍ"
         )
 
@@ -2940,9 +3001,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # الإعدادات
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "settings":
 
@@ -2959,6 +3020,7 @@ async def button_handler(
         )
 
         if "duration" not in state:
+
             state["duration"] = DEFAULT_DURATION
 
         await query.edit_message_text(
@@ -2977,9 +3039,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # المدد
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "durations":
 
@@ -3026,26 +3088,12 @@ async def button_handler(
 
             return
 
-        # التجربة المجانية دائماً 3 ثواني
-        if not has_free_trial(user_id):
+        state = user_states.setdefault(
+            user_id,
+            {}
+        )
 
-            state = user_states.setdefault(
-                user_id,
-                {}
-            )
-
-            state["duration"] = duration
-
-        else:
-
-            # يمكن للمستخدم اختيارها للإعدادات،
-            # لكن التجربة نفسها ستبقى 3 ثواني.
-            state = user_states.setdefault(
-                user_id,
-                {}
-            )
-
-            state["duration"] = duration
+        state["duration"] = duration
 
         await query.answer(
             "تم تغيير المدة."
@@ -3062,9 +3110,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # معلومات Wan
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "wan_info":
 
@@ -3099,9 +3147,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # المساعدة
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "help":
 
@@ -3129,9 +3177,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
-    # إلغاء
-    # =====================================================
+    # -----------------------------------------------------
+    # إلغاء التوليد
+    # -----------------------------------------------------
 
     if data == "cancel_generation":
 
@@ -3145,6 +3193,7 @@ async def button_handler(
         image_path = None
 
         if state:
+
             image_path = state.get(
                 "image_path"
             )
@@ -3175,9 +3224,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # الرئيسية
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "back_main":
 
@@ -3194,9 +3243,9 @@ async def button_handler(
 
         return
 
-    # =====================================================
+    # -----------------------------------------------------
     # إنشاء الفيديو
-    # =====================================================
+    # -----------------------------------------------------
 
     if data == "generate":
 
@@ -3207,10 +3256,6 @@ async def button_handler(
 
         return
 
-    # =====================================================
-    # غير معروف
-    # =====================================================
-
     await query.answer(
         "الخيار غير معروف.",
         show_alert=True
@@ -3218,7 +3263,7 @@ async def button_handler(
 
 
 # =========================================================
-# أخطاء البوت
+# معالجة الأخطاء
 # =========================================================
 
 async def error_handler(
@@ -3245,9 +3290,9 @@ def run_bot():
         .build()
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # الأوامر
-    # =====================================================
+    # -----------------------------------------------------
 
     bot_app.add_handler(
         CommandHandler(
@@ -3270,9 +3315,9 @@ def run_bot():
         )
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # الإدارة
-    # =====================================================
+    # -----------------------------------------------------
 
     bot_app.add_handler(
         CommandHandler(
@@ -3302,9 +3347,9 @@ def run_bot():
         )
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # الصور
-    # =====================================================
+    # -----------------------------------------------------
 
     bot_app.add_handler(
         MessageHandler(
@@ -3313,9 +3358,9 @@ def run_bot():
         )
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # النصوص
-    # =====================================================
+    # -----------------------------------------------------
 
     bot_app.add_handler(
         MessageHandler(
@@ -3324,9 +3369,9 @@ def run_bot():
         )
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # الأزرار
-    # =====================================================
+    # -----------------------------------------------------
 
     bot_app.add_handler(
         CallbackQueryHandler(
@@ -3334,9 +3379,9 @@ def run_bot():
         )
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # الأخطاء
-    # =====================================================
+    # -----------------------------------------------------
 
     bot_app.add_error_handler(
         error_handler
