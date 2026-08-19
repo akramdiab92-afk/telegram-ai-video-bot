@@ -2580,23 +2580,27 @@ async def generate_video(
         # =============================================
         # نجاح كامل
         # =============================================
-
-        if is_trial:
-
-            await query.edit_message_text(
-
-                "🎉 تم إنشاء تجربتك المجانية وإرسالها!\n\n"
-
-                "🎁 كانت هذه التجربة المجانية الوحيدة "
-                "المخصصة لحسابك.\n\n"
-
-                "💰 لعمل فيديوهات إضافية، "
-                "اشترِ إحدى الباقات.",
-
-                reply_markup=main_menu(
-                    user_id
+if is_trial:
+    await query.edit_message_text(
+        "🎉 تم إنشاء تجربتك المجانية وإرسالها بنجاح! 🎬\n\n"
+        "🎁 انتهت تجربتك المجانية.\n\n"
+        "يمكنك الآن شراء رصيد وإنشاء المزيد من الفيديوهات "
+        "بواسطة Wan 2.2 14B ⚡",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "💰 شراء رصيد",
+                    callback_data="buy"
                 )
-            )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏠 القائمة الرئيسية",
+                    callback_data="back_main"
+                )
+            ]
+        ])
+    )
 
         else:
 
