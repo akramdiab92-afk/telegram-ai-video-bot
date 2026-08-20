@@ -29,27 +29,23 @@ from gradio_client import Client, handle_file
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# Space الجديد الذي أرسلته
+# Space
 HF_SPACE = "IdlecloudX/wan-i2v-1"
 
-# API الخاص بالـGradio
+# API الخاص بالـSpace
 HF_API_NAME = "/generate_video"
 
-# الحد الأدنى والأقصى لمدة الفيديو
+# المدة
 MIN_DURATION = 0.5
 MAX_DURATION = 20.1
-
-# الإعداد الافتراضي
 DEFAULT_DURATION = 5.0
 
-# خطوات التوليد
+# إعدادات Wan
 DEFAULT_STEPS = 6
 
-# Guidance
 DEFAULT_GUIDANCE = 1
 DEFAULT_GUIDANCE_2 = 1
 
-# Negative Prompt
 DEFAULT_NEGATIVE_PROMPT = (
     "色调艳丽, 过曝, 静态, 细节模糊不清, 字幕, "
     "风格, 作品, 画作, 画面, 静止, 整体发灰, "
@@ -60,19 +56,17 @@ DEFAULT_NEGATIVE_PROMPT = (
     "杂乱的背景, 三条腿, 背景人很多, 倒着走"
 )
 
-# Flask حتى يبقى Render شغال
-web_app = Flask(__name__)
-
-# حالات المستخدمين
-user_states = {}
-
-# منع تشغيل أكثر من توليد لنفس المستخدم
-generation_locks = {}
-
 
 # =========================================================
 # Flask
 # =========================================================
+
+web_app = Flask(__name__)
+
+user_states = {}
+
+generation_locks = {}
+
 
 @web_app.route("/")
 def home():
@@ -85,7 +79,13 @@ def health():
 
 
 def run_web():
-    port = int(os.environ.get("PORT", "10000"))
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
+    )
 
     web_app.run(
         host="0.0.0.0",
@@ -99,14 +99,22 @@ def run_web():
 # =========================================================
 
 def get_lock(user_id):
+
     if user_id not in generation_locks:
-        generation_locks[user_id] = threading.Lock()
+
+        generation_locks[user_id] = (
+            threading.Lock()
+        )
 
     return generation_locks[user_id]
 
 
 def get_duration(user_id):
-    state = user_states.get(user_id, {})
+
+    state = user_states.get(
+        user_id,
+        {}
+    )
 
     duration = state.get(
         "duration",
@@ -114,8 +122,13 @@ def get_duration(user_id):
     )
 
     try:
-        duration = float(duration)
+
+        duration = float(
+            duration
+        )
+
     except Exception:
+
         duration = DEFAULT_DURATION
 
     if duration < MIN_DURATION:
@@ -124,29 +137,145 @@ def get_duration(user_id):
     if duration > MAX_DURATION:
         duration = MAX_DURATION
 
-    return round(duration, 1)
+    return round(
+        duration,
+        1
+    )
+
+
+def cleanup_image(user_id):
+
+    state = user_states.get(
+        user_id,
+        {}
+    )
+
+    image_path = state.get(
+        "image_path"
+    )
+
+    if image_path:
+
+        try:
+
+            if os.path.exists(
+                image_path
+            ):
+
+                os.remove(
+                    image_path
+                )
+
+        except Exception as error:
+
+            print(
+                "IMAGE CLEANUP ERROR:",
+                repr(error)
+            )
 
 
 # =========================================================
-# الاتصال بـ Hugging Face
+# Hugging Face
 # =========================================================
 
 def get_hf_client():
+
     print("=" * 60)
-    print("Connecting to Hugging Face...")
-    print("Space:", HF_SPACE)
+    print(
+        "Connecting to Hugging Face..."
+    )
+
+    print(
+        "Space:",
+        HF_SPACE
+    )
+
     print("=" * 60)
 
-    client = Client(HF_SPACE)
+    client = Client(
+        HF_SPACE
+    )
 
-    print("Hugging Face connected.")
+    print(
+        "Hugging Face connected."
+    )
 
     return client
 
 
-# =========================================================
-# توليد الفيديو
-# =========================================================
+def extract_video_path(result):
+
+    print("=" * 70)
+    print(
+        "RAW GRADIO RESULT:"
+    )
+    print(
+        repr(result)
+    )
+    print("=" * 70)
+
+    video_result = result
+
+    # النتيجة غالباً tuple
+    if isinstance(
+        result,
+        tuple
+    ):
+
+        if len(result) > 0:
+
+            video_result = result[0]
+
+    # أو list
+    elif isinstance(
+        result,
+        list
+    ):
+
+        if len(result) > 0:
+
+            video_result = result[0]
+
+    # مسار مباشر
+    if isinstance(
+        video_result,
+        str
+    ):
+
+        if os.path.exists(
+            video_result
+        ):
+
+            return video_result
+
+    # Gradio FileData
+    if isinstance(
+        video_result,
+        dict
+    ):
+
+        path = video_result.get(
+            "path"
+        )
+
+        if path and os.path.exists(
+            path
+        ):
+
+            return path
+
+        url = video_result.get(
+            "url"
+        )
+
+        if url:
+
+            return url
+
+    raise RuntimeError(
+        "Wan 2.2 لم يرجع ملف فيديو صالح."
+    )
+
 
 def generate_wan_video(
     image_path,
@@ -155,29 +284,40 @@ def generate_wan_video(
 ):
 
     print("=" * 70)
-    print("WAN 2.2 GENERATION")
-    print("Space:", HF_SPACE)
-    print("Image:", image_path)
-    print("Prompt:", prompt)
-    print("Duration:", duration)
+
+    print(
+        "WAN 2.2 GENERATION"
+    )
+
+    print(
+        "Space:",
+        HF_SPACE
+    )
+
+    print(
+        "Image:",
+        image_path
+    )
+
+    print(
+        "Prompt:",
+        prompt
+    )
+
+    print(
+        "Duration:",
+        duration
+    )
+
     print("=" * 70)
 
     client = get_hf_client()
 
-    # ترتيب المدخلات مطابق لواجهة الـSpace الحالية:
-    #
-    # input_image
-    # prompt
-    # steps
-    # negative_prompt
-    # duration_seconds
-    # guidance_scale
-    # guidance_scale_2
-    # seed
-    # randomize_seed
-
     result = client.predict(
-        handle_file(image_path),
+
+        handle_file(
+            image_path
+        ),
 
         prompt,
 
@@ -198,50 +338,13 @@ def generate_wan_video(
         api_name=HF_API_NAME
     )
 
-    print("=" * 70)
-    print("RAW GRADIO RESULT:")
-    print(repr(result))
-    print("=" * 70)
-
-    video_result = result
-
-    # الـSpace يرجع غالباً:
-    # (video_path, seed)
-
-    if isinstance(result, tuple):
-        if len(result) > 0:
-            video_result = result[0]
-
-    elif isinstance(result, list):
-        if len(result) > 0:
-            video_result = result[0]
-
-    # إذا كان مسار ملف
-    if isinstance(video_result, str):
-
-        if os.path.exists(video_result):
-            return video_result
-
-    # إذا رجع Gradio FileData
-    if isinstance(video_result, dict):
-
-        path = video_result.get("path")
-
-        if path and os.path.exists(path):
-            return path
-
-        url = video_result.get("url")
-
-        if url:
-            return url
-
-    raise RuntimeError(
-        "Wan 2.2 لم يرجع ملف فيديو صالح."
+    return extract_video_path(
+        result
     )
 
 
 # =========================================================
-# القائمة الرئيسية
+# القوائم
 # =========================================================
 
 def main_menu():
@@ -271,12 +374,10 @@ def main_menu():
 
     ]
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
-
-# =========================================================
-# قائمة المدة
-# =========================================================
 
 def duration_menu():
 
@@ -287,6 +388,7 @@ def duration_menu():
                 "0.5 ثانية",
                 callback_data="duration_0.5"
             ),
+
             InlineKeyboardButton(
                 "1 ثانية",
                 callback_data="duration_1"
@@ -298,6 +400,7 @@ def duration_menu():
                 "3 ثواني",
                 callback_data="duration_3"
             ),
+
             InlineKeyboardButton(
                 "5 ثواني ⭐",
                 callback_data="duration_5"
@@ -309,6 +412,7 @@ def duration_menu():
                 "8 ثواني",
                 callback_data="duration_8"
             ),
+
             InlineKeyboardButton(
                 "10 ثواني",
                 callback_data="duration_10"
@@ -320,6 +424,7 @@ def duration_menu():
                 "15 ثانية",
                 callback_data="duration_15"
             ),
+
             InlineKeyboardButton(
                 "20.1 ثانية 🔥",
                 callback_data="duration_20.1"
@@ -339,9 +444,12 @@ def duration_menu():
                 callback_data="back_main"
             )
         ]
+
     ]
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
 # =========================================================
@@ -355,9 +463,13 @@ async def start(
 
     user_id = update.effective_user.id
 
-    user_states[user_id] = {
-        "duration": DEFAULT_DURATION
-    }
+    # لا نمسح الحالة إذا كان المستخدم لديه عملية محفوظة
+    if user_id not in user_states:
+
+        user_states[user_id] = {
+            "duration":
+                DEFAULT_DURATION
+        }
 
     await update.message.reply_text(
 
@@ -368,14 +480,16 @@ async def start(
 
         "📷 أرسل صورة\n"
         "✍️ اكتب وصف الحركة\n"
-        "⏱️ اختر المدة التي تريدها\n"
-        "🎬 والبوت ينشئ لك الفيديو.\n\n"
+        "⏱️ اختر المدة\n"
+        "🎬 وسيتم إنشاء الفيديو.\n\n"
 
-        f"⏱️ المدة الحالية: {DEFAULT_DURATION} ثانية\n"
-        f"🔥 الحد الأقصى: {MAX_DURATION} ثانية\n\n"
+        f"⏱️ المدة الحالية: "
+        f"{get_duration(user_id)} ثانية\n"
 
-        "💰 لا يوجد دفع أو رصيد حالياً.\n"
-        "🎁 البوت مفتوح للاستخدام.",
+        f"🔥 الحد الأقصى: "
+        f"{MAX_DURATION} ثانية\n\n"
+
+        "💰 لا يوجد دفع أو رصيد داخل البوت.",
 
         reply_markup=main_menu()
     )
@@ -392,25 +506,19 @@ async def cancel(
 
     user_id = update.effective_user.id
 
-    state = user_states.pop(
+    cleanup_image(
+        user_id
+    )
+
+    user_states.pop(
         user_id,
-        {}
+        None
     )
-
-    image_path = state.get(
-        "image_path"
-    )
-
-    if image_path:
-
-        try:
-            if os.path.exists(image_path):
-                os.remove(image_path)
-        except Exception:
-            pass
 
     await update.message.reply_text(
+
         "❌ تم إلغاء العملية.",
+
         reply_markup=main_menu()
     )
 
@@ -433,10 +541,10 @@ async def help_command(
         "3️⃣ اكتب وصف الحركة\n"
         "4️⃣ اضغط إنشاء الفيديو\n\n"
 
-        "⏱️ يمكنك اختيار مدة من "
-        "0.5 إلى 20.1 ثانية.\n\n"
+        f"⏱️ المدة من {MIN_DURATION} "
+        f"إلى {MAX_DURATION} ثانية.\n\n"
 
-        "مثال للوصف:\n"
+        "مثال:\n"
         "اجعل الشخص يتحرك بشكل طبيعي، "
         "يبتسم ويحرك رأسه ببطء، "
         "مع حركة كاميرا سينمائية ناعمة "
@@ -447,7 +555,7 @@ async def help_command(
 
 
 # =========================================================
-# الصور
+# استقبال الصورة
 # =========================================================
 
 async def handle_photo(
@@ -468,7 +576,8 @@ async def handle_photo(
 
         await update.message.reply_text(
 
-            "📷 اضغط أولاً على «🎬 إنشاء فيديو».",
+            "📷 اضغط أولاً على "
+            "«🎬 إنشاء فيديو».",
 
             reply_markup=main_menu()
         )
@@ -488,13 +597,17 @@ async def handle_photo(
             delete=False
         ) as temp_file:
 
-            temp_image_path = temp_file.name
+            temp_image_path = (
+                temp_file.name
+            )
 
         await telegram_file.download_to_drive(
             custom_path=temp_image_path
         )
 
-        duration = get_duration(user_id)
+        duration = get_duration(
+            user_id
+        )
 
         user_states[user_id] = {
 
@@ -515,13 +628,10 @@ async def handle_photo(
 
             "✅ وصلت الصورة!\n\n"
 
-            f"⏱️ المدة: {duration} ثانية\n\n"
+            f"⏱️ المدة: "
+            f"{duration} ثانية\n\n"
 
-            "✍️ الآن اكتب وصف الحركة التي تريدها.\n\n"
-
-            "مثال:\n"
-            "اجعل الشخص يبتسم ويتحرك بشكل طبيعي "
-            "مع حركة كاميرا سينمائية ناعمة.",
+            "✍️ الآن اكتب وصف الحركة.",
 
         )
 
@@ -535,17 +645,23 @@ async def handle_photo(
         if temp_image_path:
 
             try:
-                os.remove(temp_image_path)
+
+                os.remove(
+                    temp_image_path
+                )
+
             except Exception:
                 pass
 
         await update.message.reply_text(
-            "❌ حدث خطأ أثناء استقبال الصورة."
+
+            "❌ حدث خطأ أثناء استقبال الصورة.\n"
+            "حاول مرة أخرى."
         )
 
 
 # =========================================================
-# النص
+# استقبال النص
 # =========================================================
 
 async def handle_text(
@@ -560,6 +676,10 @@ async def handle_text(
         {}
     )
 
+    # -----------------------------------------------------
+    # مدة مخصصة
+    # -----------------------------------------------------
+
     if state.get(
         "waiting_for_custom_duration"
     ):
@@ -573,17 +693,22 @@ async def handle_text(
         except ValueError:
 
             await update.message.reply_text(
-                "❌ اكتب مدة صحيحة، مثل: 12 أو 18.5"
+                "❌ اكتب مدة صحيحة، مثل:\n12\n18.5"
             )
 
             return
 
-        if duration < MIN_DURATION or duration > MAX_DURATION:
+        if (
+            duration < MIN_DURATION
+            or
+            duration > MAX_DURATION
+        ):
 
             await update.message.reply_text(
 
                 f"❌ المدة يجب أن تكون بين "
-                f"{MIN_DURATION} و {MAX_DURATION} ثانية."
+                f"{MIN_DURATION} و "
+                f"{MAX_DURATION} ثانية."
             )
 
             return
@@ -608,11 +733,17 @@ async def handle_text(
 
         return
 
+    # -----------------------------------------------------
+    # وصف الحركة
+    # -----------------------------------------------------
+
     if state.get(
         "waiting_for_prompt"
     ):
 
-        prompt = update.message.text.strip()
+        prompt = (
+            update.message.text.strip()
+        )
 
         if not prompt:
 
@@ -630,15 +761,14 @@ async def handle_text(
             user_id
         )
 
-        user_states[user_id] = state
-
         await update.message.reply_text(
 
             "📝 تم استلام الوصف:\n\n"
 
             f"{prompt}\n\n"
 
-            f"⏱️ المدة: {duration} ثانية\n\n"
+            f"⏱️ المدة: "
+            f"{duration} ثانية\n\n"
 
             "إذا كان كل شيء صحيحاً اضغط "
             "«🎬 إنشاء الفيديو».",
@@ -672,7 +802,9 @@ async def handle_text(
         return
 
     await update.message.reply_text(
+
         "استخدم القائمة للبدء 👇",
+
         reply_markup=main_menu()
     )
 
@@ -692,18 +824,22 @@ async def generate_video(
 
     user_id = query.from_user.id
 
-    lock = get_lock(user_id)
+    lock = get_lock(
+        user_id
+    )
 
-    if not lock.acquire(blocking=False):
+    if not lock.acquire(
+        blocking=False
+    ):
 
         await query.answer(
+
             "⏳ يوجد فيديو قيد الإنشاء بالفعل.",
+
             show_alert=True
         )
 
         return
-
-    image_path = None
 
     try:
 
@@ -724,40 +860,64 @@ async def generate_video(
             user_id
         )
 
-        if not image_path or not os.path.exists(
-            image_path
+        # -------------------------------------------------
+        # التأكد من وجود الصورة
+        # -------------------------------------------------
+
+        if (
+            not image_path
+            or
+            not os.path.exists(
+                image_path
+            )
         ):
 
             await query.edit_message_text(
+
                 "❌ الصورة غير موجودة.\n\n"
-                "ابدأ من جديد.",
+                "ابدأ عملية جديدة.",
+
                 reply_markup=main_menu()
             )
 
             return
+
+        # -------------------------------------------------
+        # التأكد من وجود الوصف
+        # -------------------------------------------------
 
         if not prompt:
 
             await query.edit_message_text(
+
                 "❌ لم يتم العثور على وصف الحركة.",
+
                 reply_markup=main_menu()
             )
 
             return
+
+        # -------------------------------------------------
+        # رسالة التوليد
+        # -------------------------------------------------
 
         await query.edit_message_text(
 
             "⏳ جاري إنشاء الفيديو...\n\n"
 
             "🤖 Wan 2.2 I2V 14B Lightning\n"
-            "⚡ FP8 / Lightning\n\n"
+            "⚡ Lightning\n\n"
 
-            f"⏱️ المدة: {duration} ثانية\n\n"
+            f"⏱️ المدة: "
+            f"{duration} ثانية\n\n"
 
-            "قد يستغرق التوليد بعض الوقت بسبب "
-            "ضغط ZeroGPU.",
-
+            "قد يستغرق التوليد بعض الوقت "
+            "بسبب ضغط ZeroGPU."
         )
+
+        # -------------------------------------------------
+        # التوليد
+        # -------------------------------------------------
 
         try:
 
@@ -776,52 +936,145 @@ async def generate_video(
 
             print("=" * 70)
             print("WAN ERROR")
-            print(type(error).__name__)
-            print(repr(error))
+            print(
+                type(error).__name__
+            )
+            print(
+                repr(error)
+            )
             print("=" * 70)
+
+            # مهم جداً:
+            # لا نحذف الصورة ولا الحالة هنا
+            # حتى تعمل إعادة المحاولة
 
             await query.edit_message_text(
 
                 "❌ فشل إنشاء الفيديو.\n\n"
 
-                "قد يكون السبب ضغطاً على ZeroGPU "
-                "أو خطأ مؤقتاً في الـSpace.\n\n"
+                "غالباً بسبب ضغط ZeroGPU "
+                "أو خطأ مؤقت في الـSpace.\n\n"
 
-                "حاول مرة أخرى بعد قليل.",
+                "يمكنك الضغط على "
+                "«🔄 إعادة المحاولة» "
+                "بدون إرسال الصورة أو كتابة الوصف من جديد.",
 
-                reply_markup=main_menu()
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "🔄 إعادة المحاولة",
+                            callback_data="retry_generation"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "⏱️ تغيير المدة",
+                            callback_data="duration_menu"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "❌ إلغاء",
+                            callback_data="cancel_generation"
+                        )
+                    ]
+
+                ])
             )
 
             return
+
+        # -------------------------------------------------
+        # التأكد من وجود الفيديو
+        # -------------------------------------------------
 
         if not video_path:
 
             await query.edit_message_text(
 
-                "❌ لم يرجع الـSpace ملف فيديو.",
+                "❌ لم يرجع الـSpace ملف فيديو.\n\n"
+                "يمكنك المحاولة مرة أخرى.",
 
-                reply_markup=main_menu()
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "🔄 إعادة المحاولة",
+                            callback_data="retry_generation"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "❌ إلغاء",
+                            callback_data="cancel_generation"
+                        )
+                    ]
+
+                ])
             )
 
             return
 
+        # -------------------------------------------------
+        # إرسال الفيديو
+        # -------------------------------------------------
+
         await query.edit_message_text(
+
             "✅ تم إنشاء الفيديو!\n\n"
             "📤 جاري إرساله إليك..."
         )
 
         try:
 
-            with open(
-                video_path,
-                "rb"
-            ) as video_file:
+            # إذا كان مسار ملف محلي
+            if (
+                isinstance(
+                    video_path,
+                    str
+                )
+                and
+                os.path.exists(
+                    video_path
+                )
+            ):
 
+                with open(
+                    video_path,
+                    "rb"
+                ) as video_file:
+
+                    await context.bot.send_video(
+
+                        chat_id=user_id,
+
+                        video=video_file,
+
+                        caption=(
+
+                            "🎬 تم إنشاء الفيديو بنجاح!\n\n"
+
+                            "🤖 Wan 2.2 I2V 14B Lightning\n"
+
+                            f"⏱️ المدة: "
+                            f"{duration} ثانية"
+                        ),
+
+                        supports_streaming=True
+                    )
+
+            else:
+
+                # إذا رجع رابط فيديو
                 await context.bot.send_video(
 
                     chat_id=user_id,
 
-                    video=video_file,
+                    video=video_path,
 
                     caption=(
 
@@ -829,7 +1082,8 @@ async def generate_video(
 
                         "🤖 Wan 2.2 I2V 14B Lightning\n"
 
-                        f"⏱️ المدة: {duration} ثانية"
+                        f"⏱️ المدة: "
+                        f"{duration} ثانية"
                     ),
 
                     supports_streaming=True
@@ -842,25 +1096,56 @@ async def generate_video(
                 repr(error)
             )
 
+            # لا نمسح الحالة هنا أيضاً
+            # حتى يستطيع المستخدم إعادة المحاولة
+
             await query.edit_message_text(
 
                 "⚠️ تم إنشاء الفيديو، "
-                "لكن حدث خطأ أثناء إرساله إلى Telegram.",
+                "لكن حدث خطأ أثناء إرساله إلى Telegram.\n\n"
 
-                reply_markup=main_menu()
+                "يمكنك محاولة إرساله مرة أخرى.",
+
+                reply_markup=InlineKeyboardMarkup([
+
+                    [
+                        InlineKeyboardButton(
+                            "🔄 إعادة المحاولة",
+                            callback_data="retry_generation"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "❌ إلغاء",
+                            callback_data="cancel_generation"
+                        )
+                    ]
+
+                ])
             )
 
             return
+
+        # -------------------------------------------------
+        # النجاح الكامل
+        # -------------------------------------------------
 
         await query.edit_message_text(
 
             "🎉 تم إنشاء الفيديو وإرساله بنجاح! 🎬\n\n"
 
-            f"⏱️ المدة: {duration} ثانية\n\n"
+            f"⏱️ المدة: "
+            f"{duration} ثانية\n\n"
 
-            "يمكنك إنشاء فيديو آخر من القائمة.",
+            "يمكنك إنشاء فيديو جديد من القائمة.",
 
             reply_markup=main_menu()
+        )
+
+        # فقط بعد النجاح نحذف الصورة والحالة
+        cleanup_image(
+            user_id
         )
 
         user_states.pop(
@@ -870,29 +1155,78 @@ async def generate_video(
 
     finally:
 
-        if image_path:
-
-            try:
-
-                if os.path.exists(
-                    image_path
-                ):
-
-                    os.remove(
-                        image_path
-                    )
-
-            except Exception as error:
-
-                print(
-                    "IMAGE DELETE ERROR:",
-                    repr(error)
-                )
-
         try:
             lock.release()
         except Exception:
             pass
+
+
+# =========================================================
+# زر إعادة المحاولة
+# =========================================================
+
+async def retry_generation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer(
+        "🔄 إعادة محاولة التوليد..."
+    )
+
+    user_id = query.from_user.id
+
+    state = user_states.get(
+        user_id,
+        {}
+    )
+
+    # التأكد أن البيانات ما زالت موجودة
+    image_path = state.get(
+        "image_path"
+    )
+
+    prompt = state.get(
+        "prompt"
+    )
+
+    if (
+        not image_path
+        or
+        not os.path.exists(
+            image_path
+        )
+    ):
+
+        await query.edit_message_text(
+
+            "❌ لم تعد الصورة موجودة.\n\n"
+            "ابدأ عملية جديدة.",
+
+            reply_markup=main_menu()
+        )
+
+        return
+
+    if not prompt:
+
+        await query.edit_message_text(
+
+            "❌ لم يعد وصف الحركة موجوداً.\n\n"
+            "ابدأ عملية جديدة.",
+
+            reply_markup=main_menu()
+        )
+
+        return
+
+    # استدعاء نفس وظيفة التوليد
+    await generate_video(
+        update,
+        context
+    )
 
 
 # =========================================================
@@ -911,7 +1245,7 @@ async def button_handler(
     data = query.data or ""
 
     # -----------------------------------------------------
-    # إنشاء فيديو
+    # فيديو جديد
     # -----------------------------------------------------
 
     if data == "new_video":
@@ -928,6 +1262,15 @@ async def button_handler(
             DEFAULT_DURATION
         )
 
+        # تنظيف أي صورة قديمة
+        if old_state.get(
+            "image_path"
+        ):
+
+            cleanup_image(
+                user_id
+            )
+
         user_states[user_id] = {
 
             "duration":
@@ -942,9 +1285,11 @@ async def button_handler(
 
         await query.edit_message_text(
 
-            "📷 أرسل الصورة التي تريد تحويلها إلى فيديو.\n\n"
+            "📷 أرسل الصورة التي تريد "
+            "تحويلها إلى فيديو.\n\n"
 
-            f"⏱️ المدة الحالية: {duration} ثانية\n\n"
+            f"⏱️ المدة الحالية: "
+            f"{duration} ثانية\n\n"
 
             "بعد إرسال الصورة سأطلب منك وصف الحركة.",
 
@@ -981,7 +1326,8 @@ async def button_handler(
 
             "⏱️ اختر مدة الفيديو:\n\n"
 
-            f"الحد الأقصى: {MAX_DURATION} ثانية",
+            f"🔥 الحد الأقصى: "
+            f"{MAX_DURATION} ثانية",
 
             reply_markup=duration_menu()
         )
@@ -996,6 +1342,8 @@ async def button_handler(
         "duration_"
     ):
 
+        await query.answer()
+
         value = data.replace(
             "duration_",
             "",
@@ -1004,25 +1352,26 @@ async def button_handler(
 
         try:
 
-            duration = float(value)
+            duration = float(
+                value
+            )
 
-        except ValueError:
+        except Exception:
 
             await query.answer(
-                "المدة غير صحيحة.",
+                "❌ مدة غير صحيحة.",
                 show_alert=True
             )
 
             return
 
-        if duration < MIN_DURATION or duration > MAX_DURATION:
-
-            await query.answer(
-                "المدة غير متاحة.",
-                show_alert=True
+        duration = max(
+            MIN_DURATION,
+            min(
+                MAX_DURATION,
+                duration
             )
-
-            return
+        )
 
         state = user_states.setdefault(
             user_id,
@@ -1034,23 +1383,57 @@ async def button_handler(
             1
         )
 
-        state.pop(
-            "waiting_for_custom_duration",
-            None
-        )
+        # إذا المستخدم كان في عملية
+        # ومعه صورة ووصف
+        if (
+            state.get("image_path")
+            and
+            state.get("prompt")
+        ):
 
-        await query.answer(
-            f"تم اختيار {duration} ثانية."
-        )
+            await query.edit_message_text(
 
-        await query.edit_message_text(
+                f"✅ تم تغيير المدة إلى "
+                f"{duration} ثانية.\n\n"
 
-            f"✅ تم اختيار {duration} ثانية.\n\n"
+                "الصورة والوصف محفوظان.\n"
+                "يمكنك المتابعة مباشرة.",
 
-            "يمكنك الآن إنشاء فيديو جديد.",
+                reply_markup=InlineKeyboardMarkup([
 
-            reply_markup=main_menu()
-        )
+                    [
+                        InlineKeyboardButton(
+                            "🎬 إنشاء الفيديو",
+                            callback_data="generate"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "⏱️ تغيير المدة",
+                            callback_data="duration_menu"
+                        )
+                    ],
+
+                    [
+                        InlineKeyboardButton(
+                            "❌ إلغاء",
+                            callback_data="cancel_generation"
+                        )
+                    ]
+
+                ])
+            )
+
+        else:
+
+            await query.edit_message_text(
+
+                f"✅ تم اختيار "
+                f"{duration} ثانية.",
+
+                reply_markup=main_menu()
+            )
 
         return
 
@@ -1071,49 +1454,45 @@ async def button_handler(
 
         await query.edit_message_text(
 
-            "✏️ اكتب المدة التي تريدها بالثواني.\n\n"
+            f"✏️ أرسل المدة التي تريدها.\n\n"
 
-            f"مثال: 12 أو 18.5\n\n"
+            f"الحد الأدنى: "
+            f"{MIN_DURATION} ثانية\n"
 
-            f"المسموح: {MIN_DURATION} - "
-            f"{MAX_DURATION} ثانية"
+            f"الحد الأقصى: "
+            f"{MAX_DURATION} ثانية\n\n"
+
+            "مثال:\n"
+            "12\n"
+            "18.5\n"
+            "20.1",
+
         )
 
         return
 
     # -----------------------------------------------------
-    # معلومات
+    # إنشاء الفيديو
     # -----------------------------------------------------
 
-    if data == "info":
+    if data == "generate":
 
-        await query.answer()
+        await generate_video(
+            update,
+            context
+        )
 
-        await query.edit_message_text(
+        return
 
-            "🤖 Wan 2.2 I2V 14B Lightning\n\n"
+    # -----------------------------------------------------
+    # إعادة المحاولة
+    # -----------------------------------------------------
 
-            "🎬 تحويل الصورة إلى فيديو\n"
-            "⚡ Lightning LoRA\n"
-            "🚀 FP8\n\n"
+    if data == "retry_generation":
 
-            f"⏱️ مدة الفيديو: "
-            f"{MIN_DURATION} - {MAX_DURATION} ثانية\n\n"
-
-            "✍️ المستخدم حر في كتابة وصف الحركة.\n\n"
-
-            "💰 لا يوجد نظام دفع أو رصيد حالياً.",
-
-            reply_markup=InlineKeyboardMarkup([
-
-                [
-                    InlineKeyboardButton(
-                        "⬅️ الرئيسية",
-                        callback_data="back_main"
-                    )
-                ]
-
-            ])
+        await retry_generation(
+            update,
+            context
         )
 
         return
@@ -1126,29 +1505,14 @@ async def button_handler(
 
         await query.answer()
 
-        state = user_states.pop(
+        cleanup_image(
+            user_id
+        )
+
+        user_states.pop(
             user_id,
-            {}
+            None
         )
-
-        image_path = state.get(
-            "image_path"
-        )
-
-        if image_path:
-
-            try:
-
-                if os.path.exists(
-                    image_path
-                ):
-
-                    os.remove(
-                        image_path
-                    )
-
-            except Exception:
-                pass
 
         await query.edit_message_text(
 
@@ -1172,22 +1536,22 @@ async def button_handler(
             {}
         )
 
-        duration = state.get(
-            "duration",
-            DEFAULT_DURATION
-        )
+        # إذا لا توجد عملية جارية
+        if not state.get(
+            "image_path"
+        ):
 
-        user_states[user_id] = {
-            "duration": duration
-        }
+            user_states[user_id] = {
+                "duration":
+                    state.get(
+                        "duration",
+                        DEFAULT_DURATION
+                    )
+            }
 
         await query.edit_message_text(
 
-            "🏠 القائمة الرئيسية\n\n"
-
-            "🤖 Wan 2.2 I2V 14B Lightning\n"
-
-            f"⏱️ المدة الحالية: {duration} ثانية",
+            "🏠 القائمة الرئيسية",
 
             reply_markup=main_menu()
         )
@@ -1195,68 +1559,104 @@ async def button_handler(
         return
 
     # -----------------------------------------------------
-    # توليد
+    # معلومات
     # -----------------------------------------------------
 
-    if data == "generate":
+    if data == "info":
 
-        await generate_video(
-            update,
-            context
+        await query.answer()
+
+        await query.edit_message_text(
+
+            "🤖 Wan 2.2 I2V 14B Lightning\n\n"
+
+            "🎬 تحويل صورة إلى فيديو\n"
+            "⚡ Lightning / FP8\n"
+            "🖼️ Image to Video\n\n"
+
+            f"⏱️ المدة: "
+            f"{MIN_DURATION} - "
+            f"{MAX_DURATION} ثانية\n\n"
+
+            "☁️ التوليد يتم عبر Hugging Face "
+            "Space.\n\n"
+
+            "⚠️ سرعة التوليد تعتمد على توفر "
+            "ZeroGPU وضغط الـSpace.",
+
+            reply_markup=InlineKeyboardMarkup([
+
+                [
+                    InlineKeyboardButton(
+                        "⬅️ الرئيسية",
+                        callback_data="back_main"
+                    )
+                ]
+
+            ])
         )
 
         return
 
-    await query.answer(
-        "الخيار غير معروف.",
-        show_alert=True
-    )
-
 
 # =========================================================
-# معالجة الأخطاء
+# الأخطاء العامة
 # =========================================================
 
 async def error_handler(
-    update,
-    context
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
 ):
 
+    print("=" * 70)
+    print("TELEGRAM ERROR")
     print(
-        "BOT ERROR:",
         repr(context.error)
     )
+    print("=" * 70)
 
 
 # =========================================================
-# تشغيل Telegram
+# تشغيل البوت
 # =========================================================
 
-def run_bot():
+def main():
 
-    bot_app = (
-        Application
-        .builder()
+    print("=" * 70)
+    print("STARTING WAN 2.2 TELEGRAM BOT")
+    print("=" * 70)
+
+    # تشغيل Flask في Thread
+    web_thread = threading.Thread(
+        target=run_web,
+        daemon=True
+    )
+
+    web_thread.start()
+
+    # إنشاء Telegram Application
+    application = (
+        Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # أوامر
-    bot_app.add_handler(
+    # الأوامر
+    application.add_handler(
         CommandHandler(
             "start",
             start
         )
     )
 
-    bot_app.add_handler(
+    application.add_handler(
         CommandHandler(
             "cancel",
             cancel
         )
     )
 
-    bot_app.add_handler(
+    application.add_handler(
         CommandHandler(
             "help",
             help_command
@@ -1264,58 +1664,47 @@ def run_bot():
     )
 
     # الصور
-    bot_app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.PHOTO,
             handle_photo
         )
     )
 
-    # النصوص
-    bot_app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_text
-        )
-    )
-
     # الأزرار
-    bot_app.add_handler(
+    application.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
-    # الأخطاء
-    bot_app.add_error_handler(
+    # النصوص
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            handle_text
+        )
+    )
+
+    application.add_error_handler(
         error_handler
     )
 
-    print("=" * 60)
-    print("Telegram bot starting...")
-    print("Wan Space:", HF_SPACE)
-    print("=" * 60)
+    print(
+        "Bot is running..."
+    )
 
-    bot_app.run_polling(
-        stop_signals=None
+    # تشغيل Telegram
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES
     )
 
 
 # =========================================================
-# البداية
+# نقطة البداية
 # =========================================================
 
 if __name__ == "__main__":
 
-    print("Starting Flask server...")
-
-    bot_thread = threading.Thread(
-        target=run_bot,
-        daemon=True
-    )
-
-    bot_thread.start()
-
-    print("Starting web server...")
-
-    run_web()
+    main()
